@@ -10,6 +10,7 @@ class Texture extends hxsl.Shader {
 		@const var additive : Bool;
 		@const var killAlpha : Bool;
 		@const var specularAlpha : Bool;
+		@const var simulateSMAA = true;
 		@range(0,1) @param var killAlphaThreshold : Float;
 
 		@param var texture : Sampler2D;
@@ -22,7 +23,17 @@ class Texture extends hxsl.Shader {
 		}
 
 		function fragment() {
-			var c = texture.get(calculatedUV);
+			var c = if (simulateSMAA) {
+				var dx = dFdx(input.uv);
+				var dy = dFdy(input.uv);
+				var c0 = texture.get(input.uv + 0.25 * dx + 0.25 * dy);
+				var c1 = texture.get(input.uv + 0.25 * dx - 0.25 * dy);
+				var c2 = texture.get(input.uv - 0.25 * dx + 0.25 * dy);
+				var c3 = texture.get(input.uv - 0.25 * dx - 0.25 * dy);
+				(c0 + c1 + c2 + c3) * 0.25;
+			} else {
+				texture.get(calculatedUV);
+			}
 			if( killAlpha && c.a - killAlphaThreshold < 0 ) discard;
 			if( additive )
 				pixelColor += c;
