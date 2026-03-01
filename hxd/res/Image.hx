@@ -268,9 +268,12 @@ class Image extends Resource {
 				inf.pixelFormat = switch formatInfo.transcoderFormat {
 					case TranscoderFormat.ASTC_4x4: hxd.PixelFormat.ASTC(10);
 					case TranscoderFormat.BC7_M5: hxd.PixelFormat.S3TC(7);
+					case TranscoderFormat.BC1: hxd.PixelFormat.S3TC(1);
 					case TranscoderFormat.BC3: hxd.PixelFormat.S3TC(3);
 					case TranscoderFormat.ETC1: hxd.PixelFormat.ETC(0);
 					case TranscoderFormat.ETC2: hxd.PixelFormat.ETC(1);
+					case TranscoderFormat.RGBA32: hxd.PixelFormat.RGBA;
+					case TranscoderFormat.RGBA_HALF: hxd.PixelFormat.RGBA16F;
 					default:
 						throw 'Unsupported transcoder format: ${formatInfo.transcoderFormat}';
 				}
@@ -568,6 +571,31 @@ class Image extends Resource {
 		loadTexture();
 	}
 
+	function resolveTextureWaitLoads() {
+		@:privateAccess if (tex.waitLoads != null) {
+			var arr = tex.waitLoads;
+			tex.waitLoads = null;
+			for (f in arr)
+				f();
+		}
+	}
+
+	static function pixelFormatFromKtx2Face(faceFormat:Int, faceType:Int):hxd.PixelFormat {
+		return switch faceFormat {
+			case hxd.CompressedTextureFormat.BPTC_FORMAT.RGBA_BPTC: hxd.PixelFormat.S3TC(7);
+			case hxd.CompressedTextureFormat.ASTC_FORMAT.RGBA_4x4: hxd.PixelFormat.ASTC(10);
+			case hxd.CompressedTextureFormat.DXT_FORMAT.RGB_DXT1, hxd.CompressedTextureFormat.DXT_FORMAT.RGBA_DXT1: hxd.PixelFormat.S3TC(1);
+			case hxd.CompressedTextureFormat.DXT_FORMAT.RGBA_DXT3: hxd.PixelFormat.S3TC(2);
+			case hxd.CompressedTextureFormat.DXT_FORMAT.RGBA_DXT5: hxd.PixelFormat.S3TC(3);
+			case hxd.CompressedTextureFormat.ETC_FORMAT.RGB_ETC1: hxd.PixelFormat.ETC(0);
+			case hxd.CompressedTextureFormat.ETC_FORMAT.RGBA_ETC2: hxd.PixelFormat.ETC(1);
+			case hxd.res.Ktx2.EngineFormat.RGBAFormat:
+				faceType == hxd.res.Ktx2.EngineType.HalfFloatType ? hxd.PixelFormat.RGBA16F : hxd.PixelFormat.RGBA;
+			default:
+				throw 'No compressed texture format found for ${StringTools.hex(faceFormat)}';
+		}
+	}
+
 	static var BLACK_1x1 = Pixels.alloc(1, 1, RGBA);
 	public static var ASYNC_LOADER:hxd.impl.AsyncLoader;
 	public static var LOG_TEXTURE_LOAD = #if heaps_texture_load true #else false #end;
@@ -612,12 +640,7 @@ class Image extends Resource {
 				bmp.dispose();
 				tex.realloc = () -> loadTexture();
 				tex.flags.unset(Loading);
-				@:privateAccess if (tex.waitLoads != null) {
-					var arr = tex.waitLoads;
-					tex.waitLoads = null;
-					for (f in arr)
-						f();
-				}
+				resolveTextureWaitLoads();
 
 				if (ENABLE_AUTO_WATCH && !watchRegistered) {
 					watchRegistered = true;
@@ -685,13 +708,9 @@ class Image extends Resource {
 				for (layer in 0...asyncMessage.faces.length) {
 					final face = asyncMessage.faces[layer];
 					for (mip in 0...face.mipmaps.length) {
-						final w = inf.width >> mip;
-						final h = inf.height >> mip;
-						inf.pixelFormat = switch face.format {
-							case hxd.CompressedTextureFormat.BPTC_FORMAT.RGBA_BPTC: hxd.PixelFormat.S3TC(7);
-							case hxd.CompressedTextureFormat.ASTC_FORMAT.RGBA_4x4: hxd.PixelFormat.ASTC(10);
-							default: throw 'No compressed texture format found for ${StringTools.hex(face.format)}';
-						}
+						final w = hxd.Math.imax(1, inf.width >> mip);
+						final h = hxd.Math.imax(1, inf.height >> mip);
+						inf.pixelFormat = pixelFormatFromKtx2Face(face.format, face.type);
 						final pixels = new hxd.Pixels(w, h, haxe.io.Bytes.ofData(face.mipmaps[mip].data.buffer), inf.pixelFormat, 0);
 						tex.uploadPixels(pixels, mip, layer);
 						pixels.dispose();
@@ -717,6 +736,7 @@ class Image extends Resource {
 				watchRegistered = true;
 				watch(watchCallb);
 			}
+			resolveTextureWaitLoads();
 		}
 		if (entry.isAvailable)
 			load();
