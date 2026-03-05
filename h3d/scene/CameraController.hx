@@ -15,7 +15,7 @@ class CameraController extends h3d.scene.Object {
 	public var fovZoomAmount = 1.1;
 	public var panSpeed = 1.;
 	public var smooth = 0.6;
-	public var minDistance : Float = 1;
+	public var minDistance : Float = 0.1;
 	public var maxDistance : Float = 1e20;
 
 	public var lockZPlanes = false;
@@ -160,8 +160,8 @@ class CameraController extends h3d.scene.Object {
 			@:privateAccess scene.events.startCapture(onEvent, function() {
 				pushing = -1;
 				var wnd = hxd.Window.getInstance();
-				wnd.setCursorPos(Std.int(pushStartX), Std.int(pushStartY));
 				wnd.mouseMode = Absolute;
+				wnd.setCursorPos(Std.int(pushStartX), Std.int(pushStartY));
 			}, e.touchId);
 			pushing = e.button;
 			pushTime = haxe.Timer.stamp();

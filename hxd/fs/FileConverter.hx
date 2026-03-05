@@ -189,24 +189,24 @@ class FileConverter {
 	}
 
 	function loadConfig( dir : String ) : ConvertConfig {
-		return getConfig(configs, defaultConfig, dir, function(fullObj) {
+		return getConfig(configs, defaultConfig, dir, (parent, obj) -> {
+			var fullObj = mergeRec(parent.obj, obj);
 			return makeConfig(fullObj);
 		});
 	}
 
-	function getConfig(cachedConfigs : Map<String, Dynamic>, defaultConfig : Dynamic, dir : String, makeConfig : Dynamic -> Dynamic) : Dynamic {
+	function getConfig(cachedConfigs : Map<String, Dynamic>, defaultConfig : Dynamic, dir : String, loadConfig : (parent: Dynamic, obj: Dynamic) -> Dynamic, configName: String = "props.json") : Dynamic {
 		var c = cachedConfigs.get(dir);
 		if( c != null ) return c;
 		var dirPos = dir.lastIndexOf("/");
-		var parent = dir == "" ? defaultConfig : getConfig(cachedConfigs, defaultConfig, dirPos < 0 ? "" : dir.substr(0,dirPos), (fullObj) -> makeConfig(fullObj));
-		var propsFile = (dir == "" ? baseDir : baseDir + dir + "/") +"props.json";
+		var parent = dir == "" ? defaultConfig : getConfig(cachedConfigs, defaultConfig, dirPos < 0 ? "" : dir.substr(0,dirPos), loadConfig, configName);
+		var propsFile = (dir == "" ? baseDir : baseDir + dir + "/") +configName;
 		if( !sys.FileSystem.exists(propsFile) ) {
 			c = parent;
 		} else {
 			var content = sys.io.File.getContent(propsFile);
 			var obj = try haxe.Json.parse(content) catch( e : Dynamic ) throw "Failed to parse "+propsFile+"("+e+")";
-			var fullObj = mergeRec(parent.obj, obj);
-			c = makeConfig(fullObj);
+			c = loadConfig(parent, obj);
 		}
 		cachedConfigs.set(dir, c);
 		return c;
@@ -347,7 +347,12 @@ class FileConverter {
 		}
 
 		var content = hxd.File.getBytes(fullPath);
-		var hash = haxe.crypto.Sha1.make(content).toHex();
+		var hash = {
+			if( match.time == time #if js && (match.milliseconds == null || match.milliseconds == milliseconds ) #end )
+				match.hash; // not changed (time stamp)
+			else
+				haxe.crypto.Sha1.make(content).toHex();
+		};
 		conv.srcBytes = content;
 		conv.hash = hash;
 		var localContext : Dynamic = null;

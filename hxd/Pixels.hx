@@ -389,11 +389,14 @@ class Pixels {
 			for( i in 0 ... this.width * this.height )
 				nbytes.setFloat(i << 2, this.bytes.getFloat(i << 4));
 			this.bytes = nbytes;
-		#if js
-		case [S3TC(a),S3TC(b)] if( a == b ): // nothing
-		case [ASTC(a),ASTC(b)] if( a == b ): // Ktx2 will handle conversion
-		case [ETC(a),ETC(b)] if( a == b ): // Ktx2 will handle conversion 
-		#end
+
+		case [S3TC(a),S3TC(b)] if( a == b ):
+			// nothing
+		case [ASTC(a),ASTC(b)] if( a == b ):
+			// Ktx2 will handle conversion
+		case [ETC(a),ETC(b)] if( a == b ):
+			// Ktx2 will handle conversion
+
 		#if (hl && hl_ver >= "1.10")
 		case [S3TC(ver),_]:
 			if( (width|height)&3 != 0 ) throw "Texture size should be 4x4 multiple";
@@ -406,11 +409,26 @@ class Pixels {
 			convert(target);
 			return;
 		#end
+
+		case [_, S3TC(1)] if( width == 1 && height == 1):
+			var out = haxe.io.Bytes.alloc(8);
+			var col0 = toRGB565(getPixel(0,0));
+			out.setUInt16(0, col0);
+			out.setUInt16(2, col0);
+			offset = 0;
+			this.bytes = out;
 		default:
 			throw "Cannot convert from " + format + " to " + target;
 		}
 
 		innerFormat = target;
+	}
+
+	static function toRGB565( color : Int ) {
+		var r = (color >> 16) & 0xFF;
+		var g = (color >> 8) & 0xFF;
+		var b = color & 0xFF;
+		return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
 	}
 
 	public function getPixel(x, y) : Int {
@@ -447,6 +465,9 @@ class Pixels {
 			bytes.setInt32(p, switchEndian(color));
 		case RG8:
 			bytes.setUInt16(p, ((color & 0xff) << 8) | ((color & 0xff00) >> 8));
+		case S3TC(1) if( width == 1 && height == 1 ):
+			var c = toRGB565(color);
+			bytes.setInt32(0, c | (c << 16)); // write both colors in cases
 		default:
 			invalidFormat();
 		}
@@ -505,7 +526,7 @@ class Pixels {
 			bytes = bytes.sub(offset, calcDataSize(width,height, format));
 			offset = 0;
 		}
- 		switch( format ) {
+		switch( format ) {
 		case ARGB:
 			png = std.format.png.Tools.build32ARGB(width, height, bytes #if (format >= "3.3") , level #end);
 		case R8:
@@ -536,27 +557,18 @@ class Pixels {
 
 	public static function calcDataSize( width : Int, height : Int, format : PixelFormat ) {
 		return switch( format ) {
-		case S3TC(n):
-			var w = (width + 3) >> 2; 
-			var h = (height + 3) >> 2;
-			var blocks = w * h; // Total number of blocks
-			if( n == 3 ) { // DXT5
-				blocks * 16; // 16 bytes per block
-			} else if( n == 1 || n == 4 ) {
-				blocks * 8; // DXT1 or BC4, 8 bytes per block
-			} else { 
-				blocks * 16; // DXT3 or BC5, 16 bytes per block, but handling like DXT5 for simplicity
-			}
-		case ASTC(n):
+		case S3TC(_):
+			(((height + 3) >> 2) << 2) * calcStride(width, format);
+		case ASTC(_):
 			var w = (width + 3) >> 2;
 			var h = (height + 3) >> 2;
 			w * h * 16;
 		case ETC(n):
-			if( n == 0 ) { // RGB_ETC1_Format or RGB_ETC2_Format
+			if( n == 0 ) {
 				var w = (width + 3) >> 2;
 				var h = (height + 3) >> 2;
 				w * h * 8;
-			} else if( n == 1 || n == 2 ) { // RGBA_ETC2_EAC_Format
+			} else if( n == 1 || n == 2 ) {
 				var w = (width + 3) >> 2;
 				var h = (height + 3) >> 2;
 				w * h * 16;
@@ -584,29 +596,23 @@ class Pixels {
 		case RGB32F: 12;
 		case RGB10A2: 4;
 		case RG11B10UF: 4;
-		case ASTC(n): 
-			var blocks = ((width + 3) >> 2) * 16;
-			blocks << 4;
+		case ASTC(_):
+			return ((width + 3) >> 2) << 4;
 		case ETC(n):
-			if( n == 0 ) { // ETC1 and ETC2 RGB
-				((width + 3) >> 2) << 3;
-			} else if( n == 1 ) {  // ETC2 EAC RGBA
-				((width + 3) >> 2) << 4;
-			} else {
-				throw "Unsupported ETC format";
-			}
+			if( n == 0 )
+				return ((width + 3) >> 2) << 3;
+			if( n == 1 || n == 2 )
+				return ((width + 3) >> 2) << 4;
+			throw "Unsupported ETC format";
 		case S3TC(n):
 			var blocks = (width + 3) >> 2;
-			if( n == 3 ) { // DXT5
-				blocks << 4; // 16 bytes per block
-			} else if( n == 1 || n == 4 ) { 
-				blocks << 1; // DXT1 or BC4, 8 bytes per block
-			} else { 
-				blocks << 2; // DXT3 or BC5, 16 bytes per block, but handling like DXT5 for simplicity
-			}
+			if( n == 1 || n == 4 )
+				return blocks << 1;
+			return blocks << 2;
 		case Depth16: 2;
 		case Depth24: 3;
 		case Depth24Stencil8, Depth32: 4;
+		case Depth32Stencil8: 8;
 		}
 	}
 
@@ -645,7 +651,7 @@ class Pixels {
 			channel.toInt() * 4;
 		case RGB10A2, RG11B10UF:
 			throw "Bit packed format";
-		case S3TC(_), ASTC(_), ETC(_), Depth16, Depth24, Depth24Stencil8, Depth32:
+		case S3TC(_), ASTC(_), ETC(_), Depth16, Depth24, Depth24Stencil8, Depth32, Depth32Stencil8:
 			throw "Not supported";
 		}
 	}
@@ -738,6 +744,7 @@ class Pixels {
 		default:
 			write( 0x4 );
 			write(switch( fmt ) {
+			case RGBA16U: 36;
 			case R16F: 111;
 			case RG16F: 112;
 			case RGBA16F: 113;

@@ -656,7 +656,7 @@ class Image extends Resource {
 		}
 		function load() {
 			if ((enableAsyncLoading || tex.flags.has(AsyncLoading)) && asyncData == null && asyncMessage == null && ASYNC_LOADER != null && ASYNC_LOADER.isSupported(this)) {
-				
+
 				tex.dispose();
 				@:privateAccess tex.customMipLevels = 1;
 				tex.flags.set(Loading);

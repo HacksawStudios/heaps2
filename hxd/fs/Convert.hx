@@ -105,7 +105,16 @@ class Convert {
 
 #if (sys || nodejs)
 class ConvertFBX2HMD extends Convert {
+	var lastModelPropsPath : String;
+	var lastModelProps : Dynamic;
+	var modelLibCache = new Map<String, Array<Dynamic>>();
+
+	// hasLocalParams -> computeLocalParams
+	var foundModelProps : Bool;
+	var modelCollides : Map<String, Array<hxd.fmt.fbx.HMDOut.CollideParams>>;
+	// computeLocalParams -> convert
 	var fbx : hxd.fmt.fbx.Data.FbxNode;
+	// context
 	var matNames : Array<String>;
 
 	public function new() {
@@ -114,6 +123,8 @@ class ConvertFBX2HMD extends Convert {
 
 	override function cleanup() {
 		super.cleanup();
+		foundModelProps = false;
+		modelCollides = null;
 		fbx = null;
 		matNames = null;
 	}
@@ -121,20 +132,44 @@ class ConvertFBX2HMD extends Convert {
 	override function hasLocalParams():Bool {
 		var filePath = srcPath.substring(srcPath.lastIndexOf("/") + 1);
 		var dirPath = srcPath.substring(0, srcPath.lastIndexOf("/"));
-		var modelPropsPath = dirPath + "/model.props";
+		// Parse model.props to find model config
+		var modelPropsPath = dirPath + "/" + h3d.prim.ModelDatabase.FILE_NAME;
+		modelCollides = [];
+		foundModelProps = parseModelProps(modelPropsPath, filePath, modelCollides);
+		return (params != null && params.collide != null) || foundModelProps;
+	}
+
+	function parseModelProps( modelPropsPath : String, filePath : String, modelCollides : Map<String, Array<hxd.fmt.fbx.HMDOut.CollideParams>> ) : Bool {
 		var foundModelProps = false;
+		var modelProps = null;
 		try {
-			var res = hxd.File.getBytes(modelPropsPath).toString();
-			var modelProps = haxe.Json.parse(res);
-			for( mp in Reflect.fields(modelProps) ) {
-				if( mp.substring(0, mp.lastIndexOf("/")) == filePath && Reflect.hasField(Reflect.field(modelProps, mp), "collide") ) {
-					foundModelProps = true;
-					break;
-				}
+			if( modelPropsPath == lastModelPropsPath ) {
+				modelProps = lastModelProps;
+			} else {
+				var res = hxd.File.getBytes(modelPropsPath).toString();
+				modelProps = haxe.Json.parse(res);
 			}
 		} catch( e ) {
 		}
-		return (params != null && params.collide != null) || foundModelProps;
+		if( modelProps != null ) {
+			for( mp in Reflect.fields(modelProps) ) {
+				var mpFile = mp.substring(0, mp.lastIndexOf("/"));
+				if( mpFile == filePath ) {
+					var mpProps = Reflect.field(modelProps, mp);
+					if( Reflect.hasField(mpProps, h3d.prim.ModelDatabase.COLLIDE_CONFIG) ) {
+						var collide = mpProps.collide;
+						if( collide == null || Std.isOfType(collide, Array) ) {
+							var mpModel = mp.substring(mp.lastIndexOf("/") + 1);
+							modelCollides.set(mpModel, collide);
+							foundModelProps = true;
+						}
+					}
+				}
+			}
+		}
+		lastModelPropsPath = modelPropsPath;
+		lastModelProps = modelProps;
+		return foundModelProps;
 	}
 
 	override function getLocalContext():Dynamic {
@@ -144,31 +179,11 @@ class ConvertFBX2HMD extends Convert {
 	override function computeLocalParams(context:Dynamic):Dynamic {
 		var filePath = srcPath.substring(srcPath.lastIndexOf("/") + 1);
 		var dirPath = srcPath.substring(0, srcPath.lastIndexOf("/"));
-		// Parse model.props to find model config
-		var modelCollides : Map<String, Array<hxd.fmt.fbx.HMDOut.CollideParams>> = [];
-		var modelPropsPath = dirPath + "/model.props";
-		var foundModelProps = false;
-		var modelProps = null;
-		try {
-			var res = hxd.File.getBytes(modelPropsPath).toString();
-			modelProps = haxe.Json.parse(res);
-		} catch( e ) {
-		}
-		if( modelProps != null ) {
-			for( mp in Reflect.fields(modelProps) ) {
-				var mpFile = mp.substring(0, mp.lastIndexOf("/"));
-				if( mpFile == filePath ) {
-					var mpModel = mp.substring(mp.lastIndexOf("/") + 1);
-					var mpProps = Reflect.field(modelProps, mp);
-					if( Reflect.hasField(mpProps, "collide") ) {
-						var collide = mpProps.collide;
-						if( collide == null || Std.isOfType(collide, Array) ) {
-							modelCollides.set(mpModel, collide);
-							foundModelProps = true;
-						}
-					}
-				}
-			}
+		// Parse model.props to find model config if not done in hasLocalParams
+		if( modelCollides == null ) {
+			var modelPropsPath = dirPath + "/" + h3d.prim.ModelDatabase.FILE_NAME;
+			modelCollides = [];
+			foundModelProps = parseModelProps(modelPropsPath, filePath, modelCollides);
 		}
 		// Parse fbx to find used materials
 		if( context != null && context.matNames != null && Std.isOfType(context.matNames, Array) ) {
@@ -193,7 +208,6 @@ class ConvertFBX2HMD extends Convert {
 		} catch( e ) {
 		}
 		if( matProps != null ) {
-			var modelLibCache = new Map<String, Array<Dynamic>>();
 			for( config in Reflect.fields(matProps) ) {
 				var configProps = Reflect.field(matProps, config);
 				for( matName in matNames ) {
@@ -211,9 +225,7 @@ class ConvertFBX2HMD extends Convert {
 						var libchildren = modelLibCache.get(m.__ref);
 						if( libchildren == null ) {
 							var lib = try haxe.Json.parse(hxd.File.getBytes(baseDir + m.__ref).toString()) catch( e ) null;
-							if( lib == null || lib.children == null )
-								continue;
-							libchildren = lib.children;
+							libchildren = lib?.children ?? [];
 							modelLibCache.set(m.__ref, libchildren);
 						}
 						for( c in libchildren ) {
@@ -279,6 +291,12 @@ class ConvertFBX2HMD extends Convert {
 				var config: Array<Float> = params.lodsDecimation;
 				hmdout.lodsDecimation = [for(lod in config) lod];
 			}
+			if (params.collisionThresholdHeight != null)
+				hmdout.collisionThresholdHeight = params.collisionThresholdHeight;
+			if (params.collisionUseLowLod != null)
+				hmdout.collisionUseLowLod = params.collisionUseLowLod;
+			if (params.legacyScaleAxisConversion != null)
+				hmdout.legacyScaleAxisConversion = params.legacyScaleAxisConversion;
 		}
 		if( localParams != null ) {
 			if( localParams.ignoreCollideMaterials != null ) {
@@ -289,7 +307,7 @@ class ConvertFBX2HMD extends Convert {
 			}
 		}
 		hmdout.load(fbx);
-		var isAnim = StringTools.startsWith(originalFilename, "Anim_") || originalFilename.toLowerCase().indexOf("_anim_") > 0;
+		var isAnim = h3d.anim.Animation.isAnimation(originalFilename);
 		var hmd = hmdout.toHMD(null, !isAnim);
 		var out = new haxe.io.BytesOutput();
 		new hxd.fmt.hmd.Writer(out).write(hmd);

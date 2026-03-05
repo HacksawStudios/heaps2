@@ -50,6 +50,7 @@ class HlslOut {
 
 	static var KWD_LIST = [
 		"s_input", "s_output", "_in", "_out", "in", "out", "mul", "matrix", "vector", "export", "half", "half2", "half3", "half4", "float", "double", "line", "linear", "point", "precise",
+		"dx", // x64
 		"sample" // pssl
 	];
 	static var KWDS = [for( k in KWD_LIST ) k => true];
@@ -99,10 +100,14 @@ class HlslOut {
 	var decls : Array<String>;
 	var kind : FunctionKind;
 	var allNames : Map<String, Int>;
+	var bindlessSamplersCount : Int;
+	var bindlessSamplers : Map<Int, Int>;
 	var samplers : Map<Int, Array<Int>>;
 	var computeLayout = [1,1,1];
 	public var varNames : Map<Int,String>;
-	public var baseRegister : Int = 0;
+
+	var isAssigningTexture : Bool = false;
+	var assignedTexture : TVar = null;
 
 	var varAccess : Map<Int,String>;
 	var isVertex(get,never) : Bool;
@@ -191,6 +196,8 @@ class HlslOut {
 			addArraySize(size);
 		case TChannel(n):
 			add("channel" + n);
+		case TTextureHandle:
+			add("uint2");
 		}
 	}
 
@@ -244,7 +251,7 @@ class HlslOut {
 			var el2 = el.copy();
 			var last = el2[el2.length - 1];
 			el2[el2.length - 1] = { e : TReturn(last), t : e.t, p : last.p };
-			var e2 = {
+			var e2 : TExpr = {
 				t : TVoid,
 				e : TBlock(el2),
 				p : e.p,
@@ -254,6 +261,10 @@ class HlslOut {
 			buf = tmp;
 			add(name);
 			add("()");
+			if ( isAssigningTexture ) {
+				var v = switch( last.e ) { case TVar(v): v; default: throw "assert"; };
+				assignedTexture = v;
+			}
 		case TIf(econd, eif, eelse):
 			add("( ");
 			addValue(econd, tabs);
@@ -415,8 +426,20 @@ class HlslOut {
 			decl("int3 ivec3( int v ) { return int3(v,v,v); }");
 		case IVec4 if( args.length == 1 && args[0].t.match(TInt | TFloat)):
 			decl("int4 ivec4( int v ) { return int4(v,v,v,v); }");
+		case ResolveSampler:
+			var tt = args[1].t;
+			var tstr = getTexType(tt);
+			decl('void resolveSampler( uint2 id, $tstr tex, SamplerState sampler ) { tex = ResourceDescriptorHeap[id.x]; sampler = SamplerDescriptorHeap[id.y]; }');
 		default:
 		}
+	}
+
+	function transferSampler( from : Int, to : Int ) {
+		var sampler = bindlessSamplers.get(from);
+		if ( sampler != null )
+			bindlessSamplers.set(to, sampler);
+		else
+			samplers.set(to, samplers.get(from));
 	}
 
 	function addExpr( e : TExpr, tabs : String ) {
@@ -437,6 +460,8 @@ class HlslOut {
 			var acc = varAccess.get(v.id);
 			if( acc != null ) add(acc);
 			ident(v);
+			if ( isAssigningTexture )
+				assignedTexture = v;
 		case TCall({ e : TGlobal(SetLayout) },_):
 			// ignore
 		case TCall({ e : TGlobal(g = (Texture | TextureLod)) }, args):
@@ -456,6 +481,15 @@ class HlslOut {
 			default: args[0];
 			}
 			switch( expr.e ) {
+			case TVar(v) if (v.kind == Local ):
+				var sampler = bindlessSamplers.get(v.id);
+				if( sampler != null )
+					add('__BindlessSamplers[${sampler}]');
+				else {
+					var samplers = samplers.get(v.id);
+					if( samplers == null ) throw "assert";
+					add('__Samplers[${samplers[offset]}]');
+				}
 			case TVar(v):
 				var samplers = samplers.get(v.id);
 				if( samplers == null ) throw "assert";
@@ -475,7 +509,7 @@ class HlslOut {
 			addValue(uv, tabs);
 			add("] = ");
 			addValue(color, tabs);
-		case TCall({ e : TGlobal(g = (Texel)) }, args):
+		case TCall({ e : TGlobal(Texel) }, args):
 			addValue(args[0], tabs);
 			add(".Load(");
 			switch( args[0].t ) {
@@ -486,14 +520,32 @@ class HlslOut {
 				throw "assert";
 			}
 			addValue(args[1],tabs);
-			if ( args.length != 2 ) {
-				// with LOD argument
-				add(", ");
-				addValue(args[2], tabs);
-			} else {
-				add(", 0");
+			add(", 0))");
+		case TCall({ e : TGlobal(TexelLod) }, args):
+			addValue(args[0], tabs);
+			add(".Load(");
+			switch( args[0].t ) {
+			case TSampler(dim,arr):
+				var size = Tools.getDimSize(dim, arr) + 1;
+				add("int"+size+"(");
+			default:
+				throw "assert";
 			}
+			addValue(args[1],tabs);
+			add(", ");
+			addValue(args[2], tabs);
 			add("))");
+		case TCall({ e : TGlobal( g = ResolveSampler) }, args = [handle, tex = { e : TVar(v)}]):
+			declGlobal(g, args);
+			add("resolveSampler");
+			add("(");
+			addValue(handle, tabs);
+			add(", ");
+			addValue(tex, tabs);
+			add(", ");
+			add('__BindlessSamplers[$bindlessSamplersCount]');
+			add(")");
+			bindlessSamplers.set(v.id, bindlessSamplersCount++);
 		case TCall(e = { e : TGlobal(g) }, args):
 			declGlobal(g, args);
 			switch( [g,args] ) {
@@ -602,6 +654,16 @@ class HlslOut {
 				add(",");
 				addValue(e2, tabs);
 				add(")");
+			case [OpAssign, TSampler(_), _]:
+				var v = switch( e1.e ) { case TVar(v) : v; default: throw "assert"; };
+				var prevAssigningTexture = isAssigningTexture;
+				isAssigningTexture = true;
+				addValue(e1, tabs);
+				add(" = ");
+				addValue(e2, tabs);
+				transferSampler(assignedTexture.id, v.id);
+				isAssigningTexture = prevAssigningTexture;
+				assignedTexture = null;
 			default:
 				addValue(e1, tabs);
 				add(" ");
@@ -622,9 +684,16 @@ class HlslOut {
 		case TVarDecl(v, init):
 			locals.set(v.id, v);
 			if( init != null ) {
+				var prevAssigningTexture = isAssigningTexture;
+				isAssigningTexture = v.type.match(TSampler(_));
 				ident(v);
 				add(" = ");
 				addValue(init, tabs);
+				if ( isAssigningTexture ) {
+					transferSampler(assignedTexture.id, v.id);
+					assignedTexture = null;
+				}
+				isAssigningTexture = prevAssigningTexture;
 			} else {
 				add("/*var*/");
 			}
@@ -659,9 +728,12 @@ class HlslOut {
 		case TDiscard:
 			add("discard");
 		case TReturn(e):
-			if( e == null )
-				add("return _out");
-			else {
+			if( e == null ) {
+				if ( isCompute )
+					add("return");
+				else
+					add("return _out");
+			} else {
 				add("return ");
 				addValue(e, tabs);
 			}
@@ -863,7 +935,7 @@ class HlslOut {
 	}
 
 	function initGlobals( s : ShaderData ) {
-		add('cbuffer _globals : register(b$baseRegister) {\n');
+		add('cbuffer _globals : register(b0) {\n');
 		for( v in s.vars )
 			if( v.kind == Global ) {
 				add("\t");
@@ -877,7 +949,7 @@ class HlslOut {
 		var textures = [];
 		var buffers = [];
 		var uavs = [];
-		add('cbuffer _params : register(b${baseRegister+1}) {\n');
+		add('cbuffer _params : register(b1) {\n');
 		for( v in s.vars )
 			if( v.kind == Param ) {
 				switch( v.type ) {
@@ -902,32 +974,37 @@ class HlslOut {
 			}
 		add("};\n\n");
 
-		var regCount = baseRegister + 2;
-		var storageRegister = 0;
+		var bufRegister = 2;
+		var texRegister = 0;
+		var uavRegister = 0;
 		for( b in buffers.concat(uavs) ) {
 			switch( b.type ) {
 			case TBuffer(t, size, Uniform):
-				add('cbuffer _buffer$regCount : register(b${regCount++}) { ');
+				add('cbuffer _buffer$bufRegister : register(b${bufRegister++}) { ');
 				addVar(b);
 				add("; };\n");
 			case TBuffer(t, size, Storage):
 				addVar(b);
-				add(' : register(t${storageRegister++});\n');
+				add(' : register(t${texRegister++});\n');
+			case TArray(TRWTexture(_), SConst(n)):
+				addVar(b);
+				add(' : register(u${uavRegister});\n');
+				uavRegister += n;
+				continue;
 			default:
 				addVar(b);
-				add(' : register(u${regCount++});\n');
+				add(' : register(u${uavRegister++});\n');
 			}
 		}
 		if( buffers.length + uavs.length > 0 ) add("\n");
 
 		var ctx = new Samplers();
-		var texCount = storageRegister;
 		for( v in textures ) {
 			addVar(v);
-			add(' : register(t${texCount});\n');
+			add(' : register(t${texRegister});\n');
 			switch( v.type ) {
-			case TArray(_,SConst(n)): texCount += n;
-			default: texCount++;
+			case TArray(_,SConst(n)): texRegister += n;
+			default: texRegister++;
 			}
 			samplers.set(v.id, ctx.make(v, []));
 		}
@@ -1011,7 +1088,11 @@ class HlslOut {
 			addVar(v);
 			add(";\n");
 		}
-		add("\n");
+
+		if ( bindlessSamplersCount > 0 ) {
+			add(STATIC);
+			add('SamplerState __BindlessSamplers[$bindlessSamplersCount];\n');
+		}
 
 		for( e in exprValues ) {
 			add(e);
@@ -1021,6 +1102,7 @@ class HlslOut {
 
 	public function run( s : ShaderData ) {
 		locals = new Map();
+		bindlessSamplers = new Map();
 		decls = [];
 		buf = new StringBuf();
 		exprValues = [];

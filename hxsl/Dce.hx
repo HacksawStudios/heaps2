@@ -1,6 +1,6 @@
 package hxsl;
-import hxsl.Debug.trace in debug;
 using hxsl.Ast;
+import hxsl.Debug.trace in debug;
 
 private class Exit {
 	public function new() {
@@ -62,9 +62,10 @@ class Dce {
 	var used : Map<Int,VarDeps>;
 	var channelVars : Array<TVar>;
 	var markAsKeep : Bool;
-	var fragDepthId = Tools.allocVarId();
+	var checkBranchesFun : TExpr -> Void;
 
 	public function new() {
+		checkBranchesFun = this.checkBranches; // prevent recreation of instance closure
 	}
 
 	public function dce( shaders : Array<ShaderData> ) {
@@ -203,27 +204,6 @@ class Dce {
 			link(v, writeTo);
 		case TSwiz({ e : TVar(v) }, swiz):
 			link(v, writeTo, swizBits(swiz));
-		case TBinop(op, { e : TGlobal(FragDepth) }, e2 ):
-			var v:TVar = {
-				id: fragDepthId,
-				name: "FragDepth",
-				type: TFloat,
-				kind: Global,
-			};
-			var v = get(v);
-			switch(op) {
-				// Last assign will always clear all other dependencies
-				case OpAssign:
-					v.adeps = [];
-					v.deps.clear();
-				case OpAssignOp(_):
-				default:
-					return;
-			}
-			v.keep = 15;
-			writeTo.push(v, 15);
-			check(e2, writeTo, isAffected);
-			writeTo.pop();
 		case TBinop(OpAssign | OpAssignOp(_), { e : TVar(v) }, e):
 			var v = get(v);
 			writeTo.push(v,15);
@@ -294,6 +274,19 @@ class Dce {
 			check(val, writeTo, isAffected);
 			writeTo.pop();
 			isAffected.append(v,15);
+		case TCall({ e : TGlobal(AtomicAdd)}, [{ e : TVar(v) }, idx, data]):
+			var v = get(v);
+			writeTo.push(v, 15);
+			check(idx, writeTo, isAffected);
+			check(data, writeTo, isAffected);
+			writeTo.pop();
+			isAffected.append(v, 15);
+		case TCall({ e : TGlobal(ResolveSampler)}, [handle, { e : TVar(v)}]):
+			var v = get(v);
+			writeTo.push(v, 15);
+			check(handle, writeTo, isAffected);
+			writeTo.pop();
+			isAffected.append(v, 15);
 		case TSyntax(_, _, args):
 			for ( arg in args ) {
 				if ( arg.access != Read ) {
@@ -335,7 +328,7 @@ class Dce {
 			check(cond, writeTo, new WriteTo());
 		default:
 		}
-		e.iter(checkBranches);
+		e.iter(checkBranchesFun);
 	}
 
 	function mapExpr( e : TExpr, isVar ) : TExpr {
@@ -351,12 +344,10 @@ class Dce {
 				count++;
 			}
 			return { e : TBlock(out), p : e.p, t : e.t };
-		case TBinop(OpAssign | OpAssignOp(_), {e: TGlobal(FragDepth) },{e: TVar(v) }) if(get(v).used == 0):
-			return { e : TConst(CNull), t : e.t, p : e.p }; 
-		case TVarDecl(v,_) | TBinop(OpAssign | OpAssignOp(_), { e : (TVar(v) | TSwiz( { e : TVar(v) }, _) | TArray( { e : TVar(v) }, _)) }, _) if( get(v).used == 0 ):
-			return { e : TConst(CNull), t : e.t, p : e.p };
-		case TBinop(OpAssign | OpAssignOp(_), { e : TSwiz( { e : TVar(v) }, swiz) }, _) if( get(v).used & swizBits(swiz) == 0 ):
-			return { e : TConst(CNull), t : e.t, p : e.p };
+		case TVarDecl(v,e2) | TBinop(OpAssign | OpAssignOp(_), { e : (TVar(v) | TSwiz( { e : TVar(v) }, _) | TArray( { e : TVar(v) }, _)) }, e2) if( get(v).used == 0 ):
+			return (e2 != null && e2.hasSideEffect()) ? mapExpr(e2, false) : { e : TConst(CNull), t : e.t, p : e.p };
+		case TBinop(OpAssign | OpAssignOp(_), { e : TSwiz( { e : TVar(v) }, swiz) }, e2) if( get(v).used & swizBits(swiz) == 0 ):
+			return  e2.hasSideEffect() ? mapExpr(e2, false) : { e : TConst(CNull), t : e.t, p : e.p };
 		case TCall({ e : TGlobal(ChannelRead) }, [_, uv, { e : TConst(CInt(cid)) }]):
 			var c = channelVars[cid];
 			return { e : TCall({ e : TGlobal(Texture), p : e.p, t : TVoid }, [{ e : TVar(c), t : c.type, p : e.p }, mapExpr(uv,true)]), t : TVoid, p : e.p };
@@ -375,6 +366,10 @@ class Dce {
 		case TCall({ e : TGlobal(ChannelTextureSize) }, [_, lod, { e : TConst(CInt(cid)) }]):
 			var c = channelVars[cid];
 			return { e : TCall({ e : TGlobal(TextureSize), p : e.p, t : TVoid }, [{ e : TVar(c), t : c.type, p : e.p }, mapExpr(lod,true)]), t : TVoid, p : e.p };
+		case TCall({ e : TGlobal(ResolveSampler)}, [handle, { e : TVar(v)}]):
+			if (get(v).used == 0)
+				return { e : TConst(CNull), t : e.t, p : e.p };
+			return e.map(function(e) return mapExpr(e,true));
 		case TIf(e, econd, eelse):
 			var e = mapExpr(e, true);
 			var econd = mapExpr(econd, isVar);

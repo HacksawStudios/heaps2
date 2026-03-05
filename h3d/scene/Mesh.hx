@@ -27,6 +27,11 @@ class Mesh extends Object {
 	public var blendshapeInstance(default, null) : h3d.prim.Blendshape.BlendshapeInstance;
 
 	/**
+		Allow user to force a specific lod index. If set to -1, forced lod will be ignored.
+	**/
+	public var forcedLod : Int = -1;
+
+	/**
 		Creates a new mesh with given primitive, material and parent object.
 		If material is not specified, a new default material is created for the current renderer.
 	**/
@@ -75,7 +80,7 @@ class Mesh extends Object {
 
 	var curScreenRatio : Float = 1.0;
 	override function draw( ctx : RenderContext ) {
-		primitive.selectMaterial(0,	primitive.screenRatioToLod(curScreenRatio));
+		primitive.selectMaterial(0,	getLodIndex());
 		primitive.render(ctx.engine);
 	}
 
@@ -102,7 +107,7 @@ class Mesh extends Object {
 
 	override function emit( ctx : RenderContext ) {
 		calcScreenRatio(ctx);
-		if ( primitive.screenRatioToLod(curScreenRatio) >= primitive.lodCount() )
+		if ( getLodIndex() >= primitive.lodCount() )
 			return;
 		ctx.emit(material, this);
 	}
@@ -122,12 +127,12 @@ class Mesh extends Object {
 	override private function onAdd() {
 		super.onAdd();
 		if ( primitive != null ) primitive.incref();
+		blendshapeInstance?.alloc();
 	}
 
 	override private function onRemove() {
 		if ( primitive != null ) primitive.decref();
 		blendshapeInstance?.dispose();
-		blendshapeInstance = null;
 		super.onRemove();
 	}
 
@@ -139,23 +144,24 @@ class Mesh extends Object {
 		return this.primitive = prim;
 	}
 
+
+	public function getLodIndex() {
+		if (forcedLod > -1)
+			return forcedLod;
+		return primitive.screenRatioToLod(curScreenRatio);
+	}
+
 	public static function screenRatio(absPos : h3d.Matrix, bounds : h3d.col.Bounds, camera : h3d.Camera) {
 		var worldCenter = absPos.getPosition();
 		var worldScale = absPos.getScale();
-		var worldRadius = bounds.dimension() * hxd.Math.max( worldScale.x, hxd.Math.max(worldScale.y, worldScale.z) ) / 2.0;
+		var worldRadius = hxd.Math.abs(bounds.getBoundingRadius() * hxd.Math.max(worldScale.x, hxd.Math.max(worldScale.y, worldScale.z)));
+		var distanceFromCamera = (worldCenter - camera.pos).length();
 
-		var cameraRight = camera.getRight();
-		var cameraUp = camera.getUp();
-		var cameraTopLeft = (cameraUp - cameraRight).normalized();
-		var worldTopLeft = worldCenter + cameraTopLeft * worldRadius;
-		var worldBottomRight = worldCenter - cameraTopLeft * worldRadius;
+		var screenMultiple = hxd.Math.max(0.5 * camera.mproj._11, 0.5 * camera.mproj._22);
 
-		var screenTopLeft = camera.projectInline( worldTopLeft.x, worldTopLeft.y, worldTopLeft.z, 1.0, 1.0, false );
-		var screenBottomRight = camera.projectInline( worldBottomRight.x, worldBottomRight.y, worldBottomRight.z, 1.0, 1.0, false );
+		var screenRadius = screenMultiple * worldRadius / hxd.Math.max(1.0, distanceFromCamera);
 
-		var screenArea = hxd.Math.max( screenBottomRight.x - screenTopLeft.x, screenBottomRight.y - screenTopLeft.y );
-
-		return screenArea * screenArea;
+		return screenRadius * 2.0;
 	}
 
 

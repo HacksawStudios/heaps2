@@ -6,23 +6,23 @@ typedef Texture = {};
 typedef Query = {};
 #elseif js
 typedef GPUBuffer = js.html.webgl.Buffer;
-typedef Texture = { t : js.html.webgl.Texture, width : Int, height : Int, internalFmt : Int, pixelFmt : Int, bits : Int, bias : Float, bind : Int #if multidriver, driver : Driver #end, startMip : Int };
+typedef Texture = { t : js.html.webgl.Texture, width : Int, height : Int, internalFmt : Int, pixelFmt : Int, bits : Int, bind : Int #if multidriver, driver : Driver #end };
 typedef Query = {};
 #elseif hlsdl
 typedef GPUBuffer = sdl.GL.Buffer;
-typedef Texture = { t : sdl.GL.Texture, width : Int, height : Int, internalFmt : Int, pixelFmt : Int, bits : Int, bind : Int, bias : Float, startMip : Int #if multidriver, driver : Driver #end };
+typedef Texture = { t : sdl.GL.Texture, width : Int, height : Int, internalFmt : Int, pixelFmt : Int, bits : Int, bind : Int #if multidriver, driver : Driver #end };
 typedef Query = { q : sdl.GL.Query, kind : QueryKind };
 #elseif usegl
 typedef GPUBuffer = haxe.GLTypes.Buffer;
-typedef Texture = { t : haxe.GLTypes.Texture, width : Int, height : Int, internalFmt : Int, pixelFmt : Int, bits : Int, bind : Int, bias : Float, startMip : Int };
+typedef Texture = { t : haxe.GLTypes.Texture, width : Int, height : Int, internalFmt : Int, pixelFmt : Int, bits : Int, bind : Int };
 typedef Query = { q : haxe.GLTypes.Query, kind : QueryKind };
 #elseif (hldx && dx12)
-typedef GPUBuffer = DX12Driver.VertexBufferData;
+typedef GPUBuffer = DX12Driver.BufferData;
 typedef Texture = h3d.impl.DX12Driver.TextureData;
 typedef Query = h3d.impl.DX12Driver.QueryData;
 #elseif hldx
 typedef GPUBuffer = dx.Resource;
-typedef Texture = { res : dx.Resource, view : dx.Driver.ShaderResourceView, ?depthView : dx.Driver.DepthStencilView, ?readOnlyDepthView : dx.Driver.DepthStencilView, rt : Array<dx.Driver.RenderTargetView>, mips : Int, ?views : Array<dx.Driver.ShaderResourceView> };
+typedef Texture = { res : dx.Resource, view : dx.Driver.ShaderResourceView, ?depthView : dx.Driver.DepthStencilView, ?readOnlyDepthView : dx.Driver.DepthStencilView, rt : Array<dx.Driver.RenderTargetView>, ?views : Array<dx.Driver.ShaderResourceView> };
 typedef Query = {};
 #elseif usesys
 typedef GPUBuffer = haxe.GraphicsDriver.GPUBuffer;
@@ -81,6 +81,10 @@ enum Feature {
 		Supports instanced rendering
 	*/
 	InstancedRendering;
+	/*
+		Supports bindless
+	*/
+	Bindless;
 }
 
 enum QueryKind {
@@ -181,6 +185,9 @@ class Driver {
 	}
 
 	public function selectMaterial( pass : h3d.mat.Pass ) {
+	}
+
+	public function selectTextureHandles( handles : Array<h3d.mat.TextureHandle> ) {
 	}
 
 	public function uploadShaderBuffers( buffers : h3d.shader.Buffers, which : h3d.shader.Buffers.BufferKind ) {
@@ -287,6 +294,14 @@ class Driver {
 		return false;
 	}
 
+	// --- MARKING API
+
+	public function beginEvent( name : String ) {
+	}
+
+	public function endEvent() {
+	}
+
 	// --- QUERY API
 
 	public function allocQuery( queryKind : QueryKind ) : Query {
@@ -320,4 +335,13 @@ class Driver {
 		throw "Compute shaders are not implemented on this platform";
 	}
 
+	// --- Bindless
+
+	public function enableBindless() {
+		throw "Bindless is not implemented on this platform";
+	}
+
+	public function getTextureHandle( t : h3d.mat.Texture ) : h3d.mat.TextureHandle {
+		throw "Bindless is not implemented on this platform";
+	}
 }

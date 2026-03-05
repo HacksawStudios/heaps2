@@ -1,5 +1,7 @@
 package h3d.prim;
 
+import hxd.fs.FileConfig;
+
 #if !macro
 typedef ModelDataInput = {
 	var resourceDirectory : String;
@@ -11,22 +13,54 @@ typedef ModelDataInput = {
 }
 #end
 
+typedef ModelProps = {
+	lodConfig: Array<Float>,
+	dynamicBones: Array<Dynamic>
+}
+
 class ModelDatabase {
+
+	public static var FILE_NAME = "model.props";
+	public static var DEFAULT_CONFIG_ENTRY = "default";
+
+	public static var LOD_CONFIG = "lodConfig";
+	public static var DYN_BONES_CONFIG = "dynamicBones";
+	public static var COLLIDE_CONFIG = "collide";
+
+	public var defaultProps = {
+		lodConfig: [ 0.5, 0.2, 0.01],
+		dynamicBones: null
+	}
 
 	public static var db : Map<String, Dynamic> = new Map();
 	var baseDir(get, never) : String;
-
-	static var FILE_NAME = "model.props";
-
-	static var LOD_CONFIG = "lodConfig";
-	static var LOD_CONFIG_FIELD = "lods.screenRatio";
-	static var DYN_BONES_CONFIG = "dynamicBones";
+	var fileConfig : FileConfig<Dynamic>;
 
 	public static dynamic function customizeLodConfig(c : Array<Float>) {
 		return c;
 	}
 
 	function new() {
+		fileConfig = new FileConfig<ModelProps>("", FILE_NAME, defaultProps);
+		#if !macro
+		fileConfig.loadConfig = (parent : ModelProps, obj : ModelProps) -> {
+			obj = Reflect.field(obj, h3d.prim.ModelDatabase.ModelDatabase.DEFAULT_CONFIG_ENTRY);
+			var res = @:privateAccess fileConfig.mergeRec(parent, obj);
+
+			// Merge arrays entries
+			if (parent?.dynamicBones != null && obj?.dynamicBones != null) {
+				var tmpMap = new Map<String, Dynamic>();
+				for (j in parent.dynamicBones)
+					tmpMap.set(j.name, j);
+				for (j in obj.dynamicBones)
+					tmpMap.set(j.name, j);
+
+				res.dynamicBones = [ for (k in tmpMap.keys()) tmpMap.get(k) ];
+			}
+
+			return res;
+		}
+		#end
 	}
 
 	function get_baseDir() return '';
@@ -118,6 +152,7 @@ class ModelDatabase {
 		#end
 	}
 
+
 	function loadLodConfig( input : ModelDataInput, data : Dynamic ) {
 		var c = Reflect.field(data, LOD_CONFIG);
 		if (c == null || input.hmd == null)
@@ -125,7 +160,7 @@ class ModelDatabase {
 		@:privateAccess input.hmd.lodConfig = c;
 	}
 
-	function loadDynamicBonesConfig( input : ModelDataInput, data : Dynamic) {
+	function loadDynamicBonesConfig( input : ModelDataInput, data : Dynamic ) {
 		var c : Array<Dynamic> = Reflect.field(data, DYN_BONES_CONFIG);
 		if (c == null || input.skin == null)
 			return;
@@ -177,9 +212,10 @@ class ModelDatabase {
 		input.skin.setSkinData(skinData);
 	}
 
+
 	function saveLodConfig( input : ModelDataInput, data : Dynamic ) @:privateAccess {
 		var isDefaultConfig = true;
-		var defaultConfig = hxd.fmt.hmd.Library.getDefaultLodConfig(input.resourceDirectory);
+		var defaultConfig = getDefaultLodConfig(input.resourceDirectory);
 
 		if (input.hmd.lodConfig != null) {
 			if (defaultConfig.length != input.hmd.lodConfig.length)
@@ -225,10 +261,31 @@ class ModelDatabase {
 				damping: dynJ.damping,
 				additive: dynJ.additive,
 				globalForce: dynJ.globalForce,
-				lockAxis: dynJ.lockAxis });
+				lockAxis: dynJ.lockAxis
+			});
 		}
 
-		if (dynamicJoints.length == 0) {
+		var isDefaultConfig = true;
+		if (dynamicJoints.length > 0) {
+			var defaultConfig : Array<Dynamic> = getDefaultDynamicBonesConfig(input.resourceDirectory);
+			if (defaultConfig == null)
+				defaultConfig = [];
+
+			var tmpMap = new Map<String, Dynamic>();
+			for (j in defaultConfig)
+				tmpMap.set(j.name, j);
+			for (jConf in dynamicJoints) {
+				var def = tmpMap.get(jConf.name);
+				if (def == null || haxe.Json.stringify(def) != haxe.Json.stringify(jConf)) {
+					tmpMap.set(jConf.name, jConf);
+					isDefaultConfig = false;
+				}
+			}
+
+			dynamicJoints = [ for (k in tmpMap.keys()) tmpMap.get(k) ];
+		}
+
+		if (isDefaultConfig || dynamicJoints.length == 0) {
 			Reflect.deleteField(data, DYN_BONES_CONFIG);
 			return;
 		}
@@ -237,11 +294,22 @@ class ModelDatabase {
 	}
 
 	function saveCollideConfig( input : ModelDataInput, data : Dynamic ) {
-		if ( !Reflect.hasField(input.collide, "collide") )
-			Reflect.deleteField(data, "collide");
+		if ( !Reflect.hasField(input.collide, COLLIDE_CONFIG) )
+			Reflect.deleteField(data, COLLIDE_CONFIG);
 		else
-			Reflect.setField(data, "collide", Reflect.field(input.collide, "collide"));
+			Reflect.setField(data, COLLIDE_CONFIG, Reflect.field(input.collide, COLLIDE_CONFIG));
 	}
+
+
+	public function getDefaultLodConfig( dir : String ) : Array<Float> {
+		var c = fileConfig.getConfig(dir).lodConfig;
+		return customizeLodConfig(c);
+	}
+
+	public function getDefaultDynamicBonesConfig( dir : String ) : Array<Dynamic> {
+		return fileConfig.getConfig(dir).dynamicBones;
+	}
+
 
 	public function loadModelProps( input : ModelDataInput ) {
 		var data : Dynamic = getModelData(input.resourceDirectory, input.resourceName, input.objectName);

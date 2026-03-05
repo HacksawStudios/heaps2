@@ -198,6 +198,14 @@ class Renderer extends h3d.scene.Renderer {
 			pbrLightPass.enableLights = true;
 		}
 		ctx.pbrLightPass = pbrLightPass;
+
+		var defaultVec = new h3d.Vector(0.0, 0.0, 0.0);
+		ctx.setGlobal("mainLightColor", defaultVec);
+		ctx.setGlobal("mainLightPower", 0);
+		ctx.setGlobal("mainLightPos", defaultVec);
+		ctx.setGlobal("mainLightDir", new h3d.Vector(0.0, 0.0, 1.0));
+		ctx.setGlobal("mainLightShadowMap", null);
+		ctx.setGlobal("mainLightViewProj", h3d.Matrix.I());
 	}
 
 	inline function cullPasses( passes : h3d.pass.PassList, f : h3d.col.Collider -> Bool ) {
@@ -226,6 +234,53 @@ class Renderer extends h3d.scene.Renderer {
 		cullPasses(passes, function(col) return col.inFrustum(ctx.camera.frustum));
 		p.draw(passes, sort);
 		passes.reset();
+	}
+
+	var hzbPass = new h3d.pass.ScreenFx(new h3d.shader.HZB());
+	public function computeHZB() : h3d.mat.Texture {
+		var hzbTarget = allocTarget("HZB", false, 1, R32F, [Target, Writable, MipMapped, ManualMipMapGen]);
+		var hzbTargetCopy = allocTarget("HZBCopy", false, 1, R32F, [Target, Writable, MipMapped, ManualMipMapGen]);
+		var depth = textures.albedo.depthBuffer;
+		var width = textures.depth.width;
+		var height = textures.depth.height;
+		var hzbShader = hzbPass.shader;
+
+		var prevFilter = depth.filter;
+		depth.filter = Nearest;
+		h3d.pass.Copy.run(depth, hzbTarget);
+		depth.filter = prevFilter;
+
+		hzbTarget.filter = hzbTargetCopy.filter = Nearest;
+		hzbTarget.mipMap = hzbTargetCopy.mipMap = Nearest;
+
+		var curWidth = width;
+		var curHeight = height;
+		var mipLevels = hzbTarget.mipLevels;
+		// DX12Driver doesn't yet handle transitions at sub-resource level.
+		// This means that we cannot bind a mip and use a different one as target.
+		// For now, we use a copy as workaround.
+		for ( lvl in 1...mipLevels ) {
+			var source = lvl & 1 == 0 ? hzbTargetCopy : hzbTarget;
+			var target = lvl & 1 == 0 ? hzbTarget : hzbTargetCopy;
+			source.startingMip = lvl - 1;
+			hzbShader.source = source;
+			hzbShader.invWidth = 1.0 / curWidth;
+			hzbShader.invHeight = 1.0 / curHeight;
+			ctx.engine.pushTarget(target, 0, lvl);
+			hzbPass.render();
+			ctx.engine.popTarget();
+
+			if ( target == hzbTargetCopy ) {
+				hzbTargetCopy.startingMip = lvl;
+				h3d.pass.Copy.run(hzbTargetCopy, hzbTarget, None, null, 0, lvl);
+			}
+			curWidth >>= 1;
+			curHeight >>= 1;
+		}
+		hzbTarget.startingMip = 0;
+		hzbTargetCopy.startingMip = 0;
+
+		return hzbTarget;
 	}
 
 	function lighting() {
@@ -288,9 +343,18 @@ class Renderer extends h3d.scene.Renderer {
 		end();
 	}
 
+	inline function shouldDoIndirect() : Bool {
+		return indirectEnv && ((env != null && env.power > 0.0) || skyMode == Background || skyMode == CustomColor);
+	}
+
+	inline function isIndirectSkyOnly() : Bool {
+		return env == null || env.power <= 0.0;
+	}
+
 	function doIndirectLighting() {
-		if( !renderLightProbes() && indirectEnv && env != null && env.power > 0.0 ) {
+		if( !renderLightProbes() && shouldDoIndirect() ) {
 			pbrProps.isScreen = true;
+			pbrIndirect.skyOnly = isIndirectSkyOnly();
 			pbrIndirect.drawIndirectDiffuse = true;
 			pbrIndirect.drawIndirectSpecular = true;
 			pbrOut.render();
@@ -317,8 +381,9 @@ class Renderer extends h3d.scene.Renderer {
 		clear(0);
 
 		// Default Env & SkyBox
-		if( indirectEnv && env != null && env.power > 0.0 ) {
+		if( shouldDoIndirect() ) {
 			pbrProps.isScreen = true;
+			pbrIndirect.skyOnly = isIndirectSkyOnly();
 			pbrIndirect.drawIndirectDiffuse = true;
 			pbrIndirect.drawIndirectSpecular = true;
 			pbrOut.render();
@@ -384,20 +449,6 @@ class Renderer extends h3d.scene.Renderer {
 		if (showEditorGuides) {
 			renderPass(defaultPass, get("debuggeom"), backToFront);
 			renderPass(defaultPass, get("debuggeom_alpha"), backToFront);
-		}
-
-		if (showEditorOutlines) {
-			var outlineTex = allocTarget("outline", true);
-			ctx.engine.pushTarget(outlineTex);
-			clear(0);
-			draw("highlightBack");
-			draw("highlight");
-			ctx.engine.popTarget();
-			var outlineBlurTex = allocTarget("outlineBlur", false);
-			outline.pass.setBlendMode(Alpha);
-			outlineBlur.apply(ctx, outlineTex, outlineBlurTex);
-			outline.shader.texture = outlineBlurTex;
-			outline.render();
 		}
 		#end
 	}
@@ -473,6 +524,7 @@ class Renderer extends h3d.scene.Renderer {
 		ctx.setGlobal("ldrMap", textures.ldr);
 		ctx.setGlobal("velocity", textures.velocity);
 		ctx.setGlobal("global.time", ctx.time);
+		ctx.setGlobal("DIFFUSE_ONLY", renderMode == LightProbe);
 		if(ctx.camera != null){
 			ctx.setGlobal("camera.position", ctx.camera.pos);
 			ctx.setGlobal("camera.inverseViewProj", ctx.camera.getInverseViewProj());

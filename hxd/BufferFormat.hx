@@ -15,7 +15,7 @@ enum abstract Precision(Int) {
 	public inline function toInt() {
 		return this;
 	}
-	static inline function fromInt( v : Int ) : Precision {
+	public static inline function fromInt( v : Int ) : Precision {
 		return new Precision(v);
 	}
 	public function toString() {
@@ -61,7 +61,7 @@ enum abstract InputFormat(Int) {
 		}
 	}
 
-	static inline function fromInt( v : Int ) : InputFormat {
+	public static inline function fromInt( v : Int ) : InputFormat {
 		return new InputFormat(v);
 	}
 
@@ -72,7 +72,7 @@ enum abstract InputFormat(Int) {
 		case TVec(4, VFloat): DVec4;
 		case TMat4 : DMat4;
 		case TBytes(4): DBytes4;
-		case TFloat: DFloat;
+		case TFloat, TInt: DFloat;
 		default: throw "Unsupported buffer type " + t;
 		}
 	}

@@ -35,6 +35,7 @@ enum Type {
 	TArray( t : Type, size : SizeDecl );
 	TBuffer( t : Type, size : SizeDecl, kind : BufferKind );
 	TChannel( size : Int );
+	TTextureHandle;
 }
 
 enum VecType {
@@ -103,6 +104,7 @@ enum VarQualifier {
 	Sampler( name : String );
 	Final;
 	Flat;
+	NoVar;
 }
 
 enum Prec {
@@ -184,13 +186,33 @@ enum TExprDef {
 	TSyntax(target : String, code : String, args : Array<SyntaxArg> ); // target = "code" should be treated as "insert regardless of target"
 }
 
-typedef TVar = {
+@:structInit
+@:publicFields
+class TVar {
 	var id : Int;
 	var name : String;
 	var type : Type;
 	var kind : VarKind;
 	@:optional var parent : TVar;
 	@:optional var qualifiers : Null<Array<VarQualifier>>;
+
+	#if heaps_compact_mem
+	/**
+		Clone but keep the same id, useful when v is inside a read-only memory.
+	**/
+	public function clone() : TVar {
+		var v = this;
+		var v2 : TVar = {
+			id : v.id,
+			name : v.name,
+			type : v.type,
+			kind : v.kind,
+			parent : v.parent?.clone(),
+			qualifiers : v.qualifiers?.copy(),
+		}
+		return v2;
+	}
+	#end
 }
 
 typedef TFunction = {
@@ -316,6 +338,8 @@ enum TGlobal {
 	UnpackSnorm4x8;
 	UnpackUnorm4x8;
 	Transpose;
+	TexelLod;
+	ResolveSampler;
 }
 
 enum SyntaxArgAccess {
@@ -336,7 +360,12 @@ enum Component {
 	W;
 }
 
-typedef TExpr = { e : TExprDef, t : Type, p : Position }
+@:structInit
+class TExpr {
+	public var e : TExprDef;
+	public var t : Type;
+	public var p : Position;
+}
 
 typedef ShaderData = {
 	var name : String;
@@ -347,6 +376,9 @@ typedef ShaderData = {
 class Tools {
 
 	static var UID = 0;
+	#if heaps_mt_hxsl_cache
+	static var uidMutex = new sys.thread.Mutex();
+	#end
 
 	public static var SWIZ = Component.createAll();
 	public static var MAX_CHANNELS_BITS = 3;
@@ -358,7 +390,14 @@ class Tools {
 		#if macro
 		return --UID;
 		#else
-		return ++UID;
+		#if heaps_mt_hxsl_cache
+		uidMutex.acquire();
+		#end
+		var id = ++UID;
+		#if heaps_mt_hxsl_cache
+		uidMutex.release();
+		#end
+		return id;
 		#end
 	}
 
@@ -546,7 +585,7 @@ class Tools {
 			return true;
 		case TCall(e, pl):
 			switch( e.e ) {
-			case TGlobal( ImageStore | AtomicAdd | GroupMemoryBarrier ):
+			case TGlobal( ImageStore | AtomicAdd | GroupMemoryBarrier | ResolveSampler ):
 				return true;
 			case TGlobal(g):
 			default:
@@ -604,7 +643,7 @@ class Tools {
 		}
 	}
 
-	public static function map( e : TExpr, f : TExpr -> TExpr ) : TExpr {
+	public static inline function map( e : TExpr, f : TExpr -> TExpr ) : TExpr {
 		var ed = switch( e.e ) {
 		case TParenthesis(e): TParenthesis(f(e));
 		case TBlock(el): TBlock([for( e in el ) f(e)]);
@@ -645,6 +684,7 @@ class Tools {
 		case TBool, TString, TSampler(_), TRWTexture(_), TFun(_): 0;
 		case TArray(t, SConst(v)), TBuffer(t, SConst(v),_): size(t) * v;
 		case TArray(_, SVar(_)), TBuffer(_): 0;
+		case TTextureHandle: 2;
 		}
 	}
 

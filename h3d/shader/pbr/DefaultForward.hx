@@ -16,11 +16,13 @@ class DefaultForward extends hxsl.Shader {
 		@const(16) var MAX_POINT_SHADOW_COUNT:Int;
 		@const(16) var MAX_SPOT_SHADOW_COUNT:Int;
 
+		@global @const var DIFFUSE_ONLY : Bool;
+
 		@:import h3d.shader.pbr.Light.LightEvaluation;
 		@:import h3d.shader.pbr.BRDF;
 
 		// Import pbr info
-		var output : {color : Vec4, metalness : Float, roughness : Float, occlusion : Float, emissive : Float, depth : Float };
+		var output : {color : Vec4, metalness : Float, roughness : Float, occlusion : Float, emissive : Float, velocity : Vec2, depth : Float };
 
 		@param var lightInfos : Buffer<Vec4, 4096>;
 
@@ -69,6 +71,9 @@ class DefaultForward extends hxsl.Shader {
 		var transformedPosition : Vec3;
 		var pixelColor : Vec4;
 		var depth : Float;
+		var pixelVelocity : Vec2;
+
+		@:import h3d.shader.ColorSpaces;
 
 		function rotateNormal( n : Vec3 ) : Vec3 {
 			return vec3(n.x * irrRotation.x - n.y * irrRotation.y, n.x * irrRotation.y + n.y * irrRotation.x, n.z);
@@ -83,8 +88,8 @@ class DefaultForward extends hxsl.Shader {
 			var envSpec = textureLod(irrSpecular, rotatedReflecVec, roughness * irrSpecularLevels).rgb;
 			var envBRDF = irrLut.get(vec2(roughness, NdV));
 			var specular = envSpec * (F * envBRDF.x + envBRDF.y);
-			var indirect = (diffuse * (1 - metalness) * (1 - F) + specular) * irrPower;
-			return indirect * occlusion;
+			var indirect = DIFFUSE_ONLY ? diffuse : (diffuse * (1 - metalness) * (1 - F) + specular);
+			return indirect * irrPower * occlusion;
 		}
 
 		function directLighting( lightColor : Vec3, lightDirection : Vec3) : Vec3 {
@@ -102,8 +107,8 @@ class DefaultForward extends hxsl.Shader {
 				var F = fresnelSchlick(VdH, F0);// Fresnel term
 				var G = geometrySchlickGGX(NdV, NdL, roughness);// Geometric attenuation
 				var specular = (D * F * G).max(0.);
-
-				result = (diffuse * (1 - metalness) * (1 - F) + specular) * lightColor * NdL;
+				var direct = DIFFUSE_ONLY ? diffuse : (diffuse * (1 - metalness) * (1 - F) + specular);
+				result = direct * lightColor * NdL;
 			}
 			return result;
 		}
@@ -303,6 +308,7 @@ class DefaultForward extends hxsl.Shader {
 			init();
 			output.color = vec4(evaluateLighting(), pixelColor.a);
 			output.depth = depth;
+			output.velocity = pixelVelocity;
 		}
 
 	};

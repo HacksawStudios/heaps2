@@ -38,6 +38,7 @@ class MemoryManager {
 	public var usedMemory(default, null) : Float = 0;
 	public var texMemory(default, null) : Float = 0;
 	public var autoDisposeCooldown : Int = 60;
+	public var autoDisposeCleanup : Int = 3600;
 	var lastAutoDispose = 0;
 
 	public function new(driver) {
@@ -79,6 +80,7 @@ class MemoryManager {
 		Might be called several times if we need to allocate a lot of memory
 	**/
 	public dynamic function garbage() {
+		if( !cleanTextures(false) ) cleanTextures(true);
 	}
 
 	public function getTriIndexes( vertices : Int ) {
@@ -140,7 +142,7 @@ class MemoryManager {
 			var size = usedMemory;
 			garbage();
 			if( usedMemory == size )
-				throw "Memory full (" + Math.fceil(size / 1024) + " KB," + buffers.length + " buffers)";
+				errorOutOfMemory();
 		}
 		usedMemory += mem;
 		buffers.push(b);
@@ -171,11 +173,12 @@ class MemoryManager {
 		return size * t.layerCount;
 	}
 
-	public function cleanTextures( force = true ) {
-		textures.sort(sortByLRU);
+	public function cleanTextures( force = true, regular = false ) {
+		textures.sort(sortByLRUPrio);
 		for( t in textures ) {
 			if( t.realloc == null || t.isDisposed() ) continue;
-			if( (force || t.lastFrame < hxd.Timer.frameCount - 3600) && t.lastFrame != h3d.mat.Texture.PREVENT_AUTO_DISPOSE ) {
+			if( regular && t.keepPriority > 0 ) break;
+			if( (force || t.lastFrame < hxd.Timer.frameCount - autoDisposeCleanup) && t.lastFrame != h3d.mat.Texture.PREVENT_AUTO_DISPOSE ) {
 				t.dispose();
 				return true;
 			}
@@ -183,8 +186,9 @@ class MemoryManager {
 		return false;
 	}
 
-	function sortByLRU( t1 : h3d.mat.Texture, t2 : h3d.mat.Texture ) {
-		return t1.lastFrame - t2.lastFrame;
+	static function sortByLRUPrio( t1 : h3d.mat.Texture, t2 : h3d.mat.Texture ) {
+		var dp = t1.keepPriority - t2.keepPriority;
+		return dp != 0 ? dp : t1.lastFrame - t2.lastFrame;
 	}
 
 	@:allow(h3d.mat.Texture.dispose)
@@ -197,21 +201,25 @@ class MemoryManager {
 	@:allow(h3d.mat.Texture.alloc)
 	function allocTexture( t : h3d.mat.Texture ) {
 		while( true ) {
-			var free = true;
-			if ( hxd.Timer.frameCount > lastAutoDispose + autoDisposeCooldown ) {
-				free = cleanTextures(false);
+			if( autoDisposeCooldown > 0 && hxd.Timer.frameCount > lastAutoDispose + autoDisposeCooldown ) {
+				cleanTextures(false, true);
 				lastAutoDispose = hxd.Timer.frameCount;
 			}
 			t.t = t.isDepth() ? driver.allocDepthBuffer(t) : driver.allocTexture(t);
 			if( t.t != null ) break;
 
 			if( driver.isDisposed() ) return;
-			while( cleanTextures(false) ) {} // clean all old textures
+			var free = false;
+			while( cleanTextures(false) ) free = true; // clean all old textures
 			if( !free && !cleanTextures(true) )
-				throw "Maximum texture memory reached";
+				errorOutOfMemory();
 		}
 		textures.push(t);
 		texMemory += memSize(t);
+	}
+
+	public dynamic function errorOutOfMemory() {
+		throw "Failed to alloc GPU Memory (full)";
 	}
 
 	// ------------------------------------- DISPOSE ------------------------------------------

@@ -73,8 +73,8 @@ class JointData {
 	public var currentAbsPos : h3d.Matrix;
 	public var additivePose : h3d.Matrix;
 
-	var targetMat : h3d.Matrix = h3d.Matrix.I();
-	var originMat : h3d.Matrix = h3d.Matrix.I();
+	var targetMat : h3d.Matrix = null;
+	var originMat : h3d.Matrix = null;
 
 	public function new() {
 		this.currentAbsPos = h3d.Matrix.I();
@@ -102,6 +102,11 @@ class JointData {
 			m.multiply3x4inline(additivePose, m);
 		if( bid >= 0 )
 			skin.currentPalette[bid].multiply3x4inline(j.transPos, m);
+
+		if (targetMat == null)
+			targetMat = m.clone();
+		if (originMat == null)
+			originMat = m.clone();
 
 		if (!Std.isOfType(this, DynamicJointData)) {
 			targetMat.load(m);
@@ -191,9 +196,11 @@ class DynamicJointData extends JointData {
 		if( j.bindIndex >= 0 )
 			skin.currentPalette[j.bindIndex].multiply3x4inline(j.transPos, Skin.TMP_MAT);
 
-		if( j.parent.bindIndex >= 0) {
-			lerpMatrixTerms(jParentData.originMat, jParentData.targetMat, alpha, Skin.TMP_MAT);
-			skin.currentPalette[j.parent.bindIndex].multiply3x4inline(j.parent.transPos, Skin.TMP_MAT);
+		if (jParentData.originMat != null && jParentData.targetMat != null) {
+			if( j.parent.bindIndex >= 0) {
+				lerpMatrixTerms(jParentData.originMat, jParentData.targetMat, alpha, Skin.TMP_MAT);
+				skin.currentPalette[j.parent.bindIndex].multiply3x4inline(j.parent.transPos, Skin.TMP_MAT);
+			}
 		}
 
 		if (jData.speed.length() != 0.)
@@ -339,11 +346,6 @@ class Skin extends MultiMaterial {
 		var s = o == null ? new Skin(null,materials.copy()) : cast o;
 		super.clone(s);
 		s.setSkinData(skinData);
-
-		s.jointsData = [];
-		for (jData in jointsData)
-			s.jointsData.push(Reflect.copy(jData));
-
 		return s;
 	}
 
@@ -402,20 +404,24 @@ class Skin extends MultiMaterial {
 		return null;
 	}
 
-	override function getLocalCollider() {
-		throw "Not implemented";
-		return null;
+	override function getLocalCollider() : h3d.col.Collider {
+		return primitive.getCollider();
 	}
 
 	override function getGlobalCollider() : h3d.col.Collider {
-		var col = cast(primitive.getCollider(), h3d.col.Collider.OptimizedCollider);
-		var primCol = Std.downcast(col.b, h3d.col.PolygonBuffer);
-		if( primCol == null ) {
+		var col = getLocalCollider();
+		if( Std.isOfType(col, h3d.col.Collider.OptimizedCollider) ) {
+			// Generated from mesh, so need skin's transform
+			var col = cast(col, h3d.col.Collider.OptimizedCollider);
+			var primCol = Std.downcast(col.b, h3d.col.PolygonBuffer);
+			if( primCol != null && primCol.source != null ) {
+				cast(primitive, h3d.prim.HMDModel).loadSkin(skinData);
+				return new h3d.col.SkinCollider(this, primCol);
+			}
 			var rootTrans = skinData.rootJoints[0].defMat.clone();
 			return new h3d.col.TransformCollider(rootTrans, col);
 		}
-		cast(primitive, h3d.prim.HMDModel).loadSkin(skinData);
-		return new h3d.col.SkinCollider(this, primCol);
+		return col;
 	}
 
 	override function calcAbsPos() {
@@ -457,6 +463,7 @@ class Skin extends MultiMaterial {
 					hasNormalMap = true;
 					break;
 				}
+			var prevSkinShader = skinShader;
 			skinShader = hasNormalMap ? new h3d.shader.SkinTangent() : new h3d.shader.Skin();
 			skinShader.fourBonesByVertex = skinData.bonesPerVertex == 4;
 			var maxBones = 0;
@@ -466,13 +473,11 @@ class Skin extends MultiMaterial {
 						maxBones = s.joints.length;
 			} else
 				maxBones = skinData.boundJoints.length;
-			if( skinShader.MaxBones < maxBones )
-				skinShader.MaxBones = maxBones;
+			skinShader.MaxBones = hxd.Math.imax(32, hxd.Math.nextPOT(maxBones));
 			for( m in materials )
 				if( m != null ) {
-					var s = m.mainPass.getShader(h3d.shader.SkinTangent);
-					if ( s != null )
-						m.mainPass.removeShader(s);
+					if ( prevSkinShader != null )
+						m.mainPass.removeShader(prevSkinShader);
 					if( m.normalMap != null ) {
 						@:privateAccess m.mainPass.addShaderAtIndex(skinShader, m.mainPass.getShaderIndex(m.normalShader) + 1);
 					} else {
@@ -610,7 +615,7 @@ class Skin extends MultiMaterial {
 			skinShader.bonesMatrixes = splitPalette[i];
 			if ( prevSplitPalette != null )
 				skinShader.prevBonesMatrixes = prevSplitPalette[i];
-			primitive.selectMaterial(i, primitive.screenRatioToLod(curScreenRatio));
+			primitive.selectMaterial(i, getLodIndex());
 			ctx.uploadParams();
 			primitive.render(ctx.engine);
 		}

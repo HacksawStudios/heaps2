@@ -111,18 +111,6 @@ class Text extends Drawable {
 		Allow line break.
 	**/
 	public var lineBreak(default,set) : Bool = true;
-	/**
-		Allow word wrapping.
-	**/
-	public var wordWrap(default,set) : Bool = true;
-	/**
-		Highlight RGB color. Alpha value is ignored.
-	**/
-	public var highlightColor : Int = 0xFFFFFF;
-	/**
-		Tag for indicating highlighted text.
-	**/
-	public var highlightTag : String = "";
 
 	var glyphs : TileGroup;
 	var needsRebuild : Bool;
@@ -139,6 +127,7 @@ class Text extends Drawable {
 	var realMaxWidth:Float = -1;
 
 	var sdfShader : h3d.shader.SignedDistanceField;
+	var colorSegments : Array<Int> = null;
 
 	/**
 		Creates a new Text instance.
@@ -208,13 +197,6 @@ class Text extends Drawable {
 	function set_lineBreak(b) {
 		if( lineBreak == b ) return b;
 		lineBreak = b;
-		rebuild();
-		return b;
-	}
-
-	function set_wordWrap(b) {
-		if( wordWrap == b ) return b;
-		wordWrap = b;
 		rebuild();
 		return b;
 	}
@@ -347,49 +329,20 @@ class Text extends Drawable {
 		var lines = [], restPos = 0;
 		var x = leftMargin;
 		var wLastSep = 0.;
-		var skipCount = 0;
-		
-		final nonBreakingSpaceTag = '&nbsp;';
-		final  textSize = if (StringTools.contains(text,nonBreakingSpaceTag)) {
-			StringTools.replace(text, nonBreakingSpaceTag, ' ').length;
-		} else {
-			text.length;
-		};
-		for( i in 0... textSize ) {
+		for( i in 0...text.length ) {
 			var cc = StringTools.fastCodeAt(text, i);
-			final remaining = text.substr(i);
-
-			if (skipCount > 0)
-			{
-				skipCount--;
-				continue;
-			}
-
-			if (highlightTag != null && highlightTag != "" && StringTools.startsWith(remaining, highlightTag))
-			{
-				skipCount = highlightTag.length-1;
-				continue;
-			}
-			final isNonBreakingSpace = StringTools.startsWith(remaining,nonBreakingSpaceTag);
-			if (isNonBreakingSpace) {
-				final nbspTagSize = nonBreakingSpaceTag.length; 
-				final preceding = text.substr(0, i + nbspTagSize);
-				final exceedingNbsp = remaining.substr(nbspTagSize);
-				text = StringTools.replace(preceding, nonBreakingSpaceTag, ' ') + exceedingNbsp;
-				cc = 32;
-			}
 			var e = font.getChar(cc);
 			var newline = cc == '\n'.code;
 			var esize = e.width + e.getKerningOffset(prevChar);
-			var isComplement = (i <  textSize - 1 && font.charset.isComplementChar(StringTools.fastCodeAt(text, i + 1)));
-			if( font.charset.isBreakChar(cc) && !isNonBreakingSpace && !isComplement ) {
+			var isComplement = (i < text.length - 1 && font.charset.isComplementChar(StringTools.fastCodeAt(text, i + 1)));
+			if( font.charset.isBreakChar(cc) && !isComplement ) {
 				if( lines.length == 0 && leftMargin > 0 && x > maxWidth ) {
 					lines.push("");
 					if ( sizes != null ) sizes.push(leftMargin);
 					x -= leftMargin;
 				}
 				var size = x + esize + letterSpacing; /* TODO : no letter spacing */
-				var k = i + 1, max =  textSize;
+				var k = i + 1, max = text.length;
 				var prevChar = cc;
 				var breakFound = false;
 				while( size <= maxWidth && k < max ) {
@@ -401,8 +354,8 @@ class Text extends Drawable {
 					var e = font.getChar(cc);
 					size += e.width + letterSpacing + e.getKerningOffset(prevChar);
 					prevChar = cc;
-					if ( font.charset.isBreakChar(cc) && !isNonBreakingSpace ) {
-						if ( k >=  textSize )
+					if ( font.charset.isBreakChar(cc) ) {
+						if ( k >= text.length )
 							break;
 						var nc = StringTools.fastCodeAt(text, k);
 						if ( !font.charset.isComplementChar(nc) ) break;
@@ -420,11 +373,10 @@ class Text extends Drawable {
 				}
 				else wLastSep = size;
 			}
-			else if( wordWrap && (x + esize + letterSpacing) - wLastSep > (maxWidth-esize) ) {
+			else if( (x + esize + letterSpacing) - wLastSep > maxWidth && lineBreak ) {
 				newline = true;
 				lines.push(text.substr(restPos, i - restPos));
-				restPos = i;
-				x -= esize + letterSpacing;
+				restPos = font.charset.isSpace(cc) ? i + 1 : i;
 			}
 			if( e != null && cc != '\n'.code )
 				x += esize + letterSpacing;
@@ -436,13 +388,13 @@ class Text extends Drawable {
 			} else
 				prevChar = cc;
 		}
-		if( restPos <  textSize ) {
+		if( restPos < text.length ) {
 			if( lines.length == 0 && leftMargin > 0 && x + afterData - letterSpacing > maxWidth ) {
 				lines.push("");
 				if ( sizes != null ) sizes.push(leftMargin);
 				x -= leftMargin;
 			}
-			lines.push(text.substr(restPos,  textSize - restPos));
+			lines.push(text.substr(restPos, text.length - restPos));
 			if ( sizes != null ) sizes.push(x);
 		}
 		return lines.join("\n");
@@ -482,36 +434,23 @@ class Text extends Drawable {
 			x = 0;
 		}
 
-		glyphs.setDefaultColor(textColor);
-		var isHighlight = false;
-		var skipCount = 0;
+		var colors = colorSegments;
+		var colorsPos = 0;
+		if( colors != null && colors.length == 0 ) colors = null;
+		if( rebuild ) glyphs.setDefaultColor(0xFFFFFF);
 		for( i in 0...t.length ) {
 			var cc = StringTools.fastCodeAt(t, i);
-			final remaining = t.substr(i);
-
-			if (skipCount > 0)
-			{
-				skipCount--;
-				continue;
-			}
-
-			if (highlightTag != null && highlightTag != "" && StringTools.startsWith(remaining, highlightTag))
-			{
-				if (!isHighlight) {
-					glyphs.setDefaultColor(highlightColor);
-					isHighlight = true;
-				} else {
-					glyphs.setDefaultColor(textColor);
-					isHighlight = false;
-				}
-				skipCount = highlightTag.length-1;
-				continue;
-			}
-
 			var e = font.getChar(cc);
 			var offs = e.getKerningOffset(prevChar);
 			var esize = e.width + offs;
 			// if the next word goes past the max width, change it into a newline
+
+			if( rebuild && colors != null && colors[colorsPos] == i ) {
+				var c = colors[colorsPos+1];
+				glyphs.setDefaultColor(c,(c>>>24)/255);
+				colorsPos += 2;
+				if( colorsPos >= colors.length ) colors = null;
+			}
 
 			if( cc == '\n'.code ) {
 				if( x > xMax ) xMax = x;
@@ -583,7 +522,20 @@ class Text extends Drawable {
 	function set_textColor(c) {
 		if( this.textColor == c ) return c;
 		this.textColor = c;
+		var a = color.w;
+		color.setColor(c);
+		color.w = a;
 		return c;
+	}
+
+	/**
+		Set the text color segments. This is an Array containing a pair of (position,color).
+		Each time the text display will reach the given position, the color will be set.
+		The segment color is multiplied by the global textColor.
+	**/
+	public function setColorSegments( arr ) {
+		colorSegments = arr;
+		needsRebuild = true;
 	}
 
 	override function getBoundsRec( relativeTo : Object, out : h2d.col.Bounds, forSize : Bool ) {
