@@ -59,14 +59,26 @@ class Ktx2 {
 		bytes.position = header.dfdByteOffset;
 		final dfd = readDfd(bytes);
 		bytes.position = dfdPos;
+		final restorePos = bytes.position;
+		bytes.position = 0;
+		final sourceBytes = bytes.readAll();
+		bytes.position = restorePos;
 		final file:Ktx2File = {
 			header: header,
 			levels: levels,
 			dfd: dfd,
-			data: new Uint8Array(cast @:privateAccess bytes.b),
+			data: toUint8Array(sourceBytes),
 			supercompressionGlobalData: null,
 		}
 		return file;
+	}
+
+	static inline function toUint8Array(bytes:haxe.io.Bytes):Uint8Array {
+		#if js
+		return new Uint8Array(cast bytes.getData());
+		#else
+		return haxe.io.UInt8Array.fromBytes(bytes);
+		#end
 	}
 
 	/**

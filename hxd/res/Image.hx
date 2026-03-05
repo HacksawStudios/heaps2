@@ -778,6 +778,16 @@ class Image extends Resource {
 					}
 				}
 			case Ktx2ETC1S, Ktx2UASTC:
+				if (asyncMessage == null) {
+					var bytes = asyncData == null ? entry.getBytes() : asyncData;
+					var reader = new haxe.io.BytesInput(bytes);
+					hxd.res.Ktx2.Ktx2Decoder.getTranscodedData(reader, (data, _header) -> {
+						if (tex == null || tex.isDisposed())
+							return;
+						loadTexture(null, data);
+					});
+					return;
+				}
 				for (layer in 0...asyncMessage.faces.length) {
 					final face = asyncMessage.faces[layer];
 					for (mip in 0...face.mipmaps.length) {
