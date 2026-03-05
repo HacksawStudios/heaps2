@@ -3,7 +3,6 @@ import h3d.impl.Driver;
 import h3d.mat.Pass;
 import h3d.mat.Stencil;
 import h3d.mat.Data;
-import hxd.CompressedTextureFormat;
 
 #if (js||hlsdl||usegl)
 
@@ -1030,14 +1029,15 @@ class GlDriver extends Driver {
 		case GL.RGB10_A2: GL.RGBA;
 		case GL.RED, GL.R8, GL.R16F, GL.R32F, 0x822A: GL.RED;
 		case GL.RG, GL.RG8, GL.RG16F, GL.RG32F, 0x822C: GL.RG;
-		case GL.RGB16F, GL.RGB32F, 0x8054, CompressedTextureFormat.BPTC_FORMAT.RGB_BPTC_UNSIGNED, CompressedTextureFormat.ETC_FORMAT.RGB_ETC1: GL.RGB;
+		case GL.RGB16F, GL.RGB32F, 0x8054, 0x8E8F, 0x8D64: GL.RGB;
 		case 0x805B,
-			CompressedTextureFormat.DXT_FORMAT.RGBA_DXT1,
-			CompressedTextureFormat.DXT_FORMAT.RGBA_DXT3,
-			CompressedTextureFormat.DXT_FORMAT.RGBA_DXT5,
-			CompressedTextureFormat.ASTC_FORMAT.RGBA_4x4,
-			CompressedTextureFormat.BPTC_FORMAT.RGBA_BPTC,
-			CompressedTextureFormat.ETC_FORMAT.RGBA_ETC2: GL.RGBA;
+			0x83F1, // DXT1
+			0x83F2, // DXT3
+			0x83F3, // DXT5
+			0x93B0, // ASTC 4x4
+			0x8E8C, // BPTC RGBA
+			0x9278: // ETC2 RGBA
+			GL.RGBA;
 		default: throw "Invalid format " + t.internalFmt;
 		}
 	}
@@ -1142,32 +1142,32 @@ class GlDriver extends Driver {
 		case RG11B10UF:
 			tt.internalFmt = GL.R11F_G11F_B10F;
 			tt.pixelFmt = GL.UNSIGNED_INT_10F_11F_11F_REV;
-		case S3TC(n) if( n <= maxCompressedTexturesSupport ):
-			if( t.width&3 != 0 || t.height&3 != 0 )
-				throw "Compressed texture "+t+" has size "+t.width+"x"+t.height+" - must be a multiple of 4";
-			switch( n ) {
-			case 1: tt.internalFmt = CompressedTextureFormat.DXT_FORMAT.RGBA_DXT1;
-			case 2: tt.internalFmt = CompressedTextureFormat.DXT_FORMAT.RGBA_DXT3;
-			case 3: tt.internalFmt = CompressedTextureFormat.DXT_FORMAT.RGBA_DXT5;
-			case 6: tt.internalFmt = CompressedTextureFormat.BPTC_FORMAT.RGB_BPTC_UNSIGNED;
-			case 7: tt.internalFmt = CompressedTextureFormat.BPTC_FORMAT.RGBA_BPTC;
-			default: throw "Unsupported texture format "+t.format;
-			}
-		case ASTC(n):
-			if( t.width&3 != 0 || t.height&3 != 0 )
-				throw "Compressed texture "+t+" has size "+t.width+"x"+t.height+" - must be a multiple of 4";
-			switch( n ) {
-			case 10: tt.internalFmt = CompressedTextureFormat.ASTC_FORMAT.RGBA_4x4;
-			default: throw "Unsupported texture format "+t.format;
-			}
-		case ETC(n):
-			if( t.width&3 != 0 || t.height&3 != 0 )
-				throw "Compressed texture "+t+" has size "+t.width+"x"+t.height+" - must be a multiple of 4";
-			switch( n ) {
-			case 0: tt.internalFmt = CompressedTextureFormat.ETC_FORMAT.RGB_ETC1;
-			case 1, 2: tt.internalFmt = CompressedTextureFormat.ETC_FORMAT.RGBA_ETC2;
-			default: throw "Unsupported texture format "+t.format;
-			}
+			case S3TC(n) if( n <= maxCompressedTexturesSupport ):
+				if( t.width&3 != 0 || t.height&3 != 0 )
+					throw "Compressed texture "+t+" has size "+t.width+"x"+t.height+" - must be a multiple of 4";
+				switch( n ) {
+				case 1: tt.internalFmt = 0x83F1; // COMPRESSED_RGBA_S3TC_DXT1_EXT
+				case 2: tt.internalFmt = 0x83F2; // COMPRESSED_RGBA_S3TC_DXT3_EXT
+				case 3: tt.internalFmt = 0x83F3; // COMPRESSED_RGBA_S3TC_DXT5_EXT
+				case 6: tt.internalFmt = 0x8E8F; // COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT
+				case 7: tt.internalFmt = 0x8E8C; // COMPRESSED_RGBA_BPTC_UNORM
+				default: throw "Unsupported texture format "+t.format;
+				}
+			case ASTC(n):
+				if( t.width&3 != 0 || t.height&3 != 0 )
+					throw "Compressed texture "+t+" has size "+t.width+"x"+t.height+" - must be a multiple of 4";
+				switch( n ) {
+				case 10: tt.internalFmt = 0x93B0; // COMPRESSED_RGBA_ASTC_4x4_KHR
+				default: throw "Unsupported texture format "+t.format;
+				}
+			case ETC(n):
+				if( t.width&3 != 0 || t.height&3 != 0 )
+					throw "Compressed texture "+t+" has size "+t.width+"x"+t.height+" - must be a multiple of 4";
+				switch( n ) {
+				case 0: tt.internalFmt = 0x8D64; // ETC1
+				case 1, 2: tt.internalFmt = 0x9278; // ETC2 RGBA8
+				default: throw "Unsupported texture format "+t.format;
+				}
 		default:
 			throw "Unsupported texture format "+t.format;
 		}

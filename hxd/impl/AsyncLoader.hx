@@ -50,6 +50,8 @@ class ThreadAsyncLoader implements AsyncLoader {
 					}
 				}
 				size = pos;
+			case Ktx2:
+				size = t.entry.size;
 			case Raw:
 				size = hxd.Pixels.calcDataSize(inf.width, inf.height, inf.pixelFormat);
 			default:
@@ -77,7 +79,7 @@ class ThreadAsyncLoader implements AsyncLoader {
 
 	public function isSupported(t:hxd.res.Image) {
 		return enabled && switch( t.getFormat() ) {
-		case Dds, Raw: true;
+		case Dds, Raw, Ktx2: true;
 		default: false;
 		}
 	}

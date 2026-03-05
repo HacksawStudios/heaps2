@@ -14,6 +14,7 @@ enum abstract ImageFormat(Int) {
 	var Hdr = 6;
 	var Ktx2ETC1S = 7;
 	var Ktx2UASTC = 8;
+	var Ktx2 = 9;
 
 	/*
 		Tells if we might not be able to directly decode the image without going through a loadBitmap async call.
@@ -43,6 +44,7 @@ enum abstract ImageFormat(Int) {
 			case Hdr: "HDR";
 			case Ktx2ETC1S: "KTX2ETC1S";
 			case Ktx2UASTC: "KTX2UASTC";
+			case Ktx2: "KTX2";
 		};
 	}
 }
@@ -62,6 +64,7 @@ class ImageInfo {
 	public var flags(default, null):haxe.EnumFlags<ImageInfoFlag>;
 	public var dataFormat(default, null):ImageFormat;
 	public var pixelFormat(default, null):PixelFormat;
+	public var ktx2Levels(default, null):Array<hxd.res.Ktx2.KTX2Level>;
 
 	public function new() {
 		flags = new haxe.EnumFlags();
@@ -254,38 +257,37 @@ class Image extends Resource {
 					throw entry.path + " has unsupported 4CC " + fid;
 				}
 
-			#if js
 			case 0x4273:
 				throw 'Use .ktx2 files for GPU compressed textures instead of .basis';
 			case 0x4BAB:
-				final ktx2 = hxd.res.Ktx2.readFile(new haxe.io.BytesInput(@:privateAccess f.cache));
-				final basisFormat = switch ktx2.dfd.colorModel {
-					case hxd.res.Ktx2.DFDModel.ETC1S: BasisFormat.ETC1S;
-					case hxd.res.Ktx2.DFDModel.UASTC: BasisFormat.UASTC;
-					default: throw 'Unsupported colorModel in ktx2 file: ${ktx2.dfd.colorModel}';
-				}
-				final formatInfo = hxd.res.Ktx2.Ktx2Decoder.getTranscoderFormat(basisFormat, ktx2.header.pixelWidth, ktx2.header.pixelHeight, ktx2.dfd.hasAlpha());
-				inf.pixelFormat = switch formatInfo.transcoderFormat {
-					case TranscoderFormat.ASTC_4x4: hxd.PixelFormat.ASTC(10);
-					case TranscoderFormat.BC7_M5: hxd.PixelFormat.S3TC(7);
-					case TranscoderFormat.BC1: hxd.PixelFormat.S3TC(1);
-					case TranscoderFormat.BC3: hxd.PixelFormat.S3TC(3);
-					case TranscoderFormat.ETC1: hxd.PixelFormat.ETC(0);
-					case TranscoderFormat.ETC2: hxd.PixelFormat.ETC(1);
-					case TranscoderFormat.RGBA32: hxd.PixelFormat.RGBA;
-					case TranscoderFormat.RGBA_HALF: hxd.PixelFormat.RGBA16F;
-					default:
-						throw 'Unsupported transcoder format: ${formatInfo.transcoderFormat}';
-				}
-				inf.mipLevels = ktx2.header.levelCount;
+				final ktx2 = hxd.res.Ktx2.readFile(new haxe.io.BytesInput(entry.getBytes()));
 				inf.width = ktx2.header.pixelWidth;
 				inf.height = ktx2.header.pixelHeight;
-				inf.dataFormat = switch ktx2.dfd.colorModel {
-					case hxd.res.Ktx2.DFDModel.ETC1S: Ktx2ETC1S;
-					case hxd.res.Ktx2.DFDModel.UASTC: Ktx2UASTC;
-					default: throw 'Unsupported colorModel in ktx2 file ${ktx2.dfd.colorModel}';
+				inf.mipLevels = hxd.Math.imax(1, ktx2.header.levelCount);
+				inf.ktx2Levels = ktx2.levels;
+				if (ktx2.header.vkFormat == 0) {
+					final basisFormat = switch ktx2.dfd.colorModel {
+						case hxd.res.Ktx2.DFDModel.ETC1S: BasisFormat.ETC1S;
+						case hxd.res.Ktx2.DFDModel.UASTC: BasisFormat.UASTC;
+						default: throw 'Unsupported colorModel in ktx2 file: ${ktx2.dfd.colorModel}';
+					}
+					#if js
+					final formatInfo = hxd.res.Ktx2.Ktx2Decoder.getTranscoderFormat(basisFormat, ktx2.header.pixelWidth, ktx2.header.pixelHeight, ktx2.dfd.hasAlpha());
+					inf.pixelFormat = pixelFormatFromTranscoderFormat(formatInfo.transcoderFormat);
+					inf.dataFormat = switch ktx2.dfd.colorModel {
+						case hxd.res.Ktx2.DFDModel.ETC1S: Ktx2ETC1S;
+						case hxd.res.Ktx2.DFDModel.UASTC: Ktx2UASTC;
+						default: throw 'Unsupported colorModel in ktx2 file ${ktx2.dfd.colorModel}';
+					}
+					#else
+					throw 'KTX2 Basis textures are not supported on this target (${entry.path}). Use vkFormat KTX2 payloads for native targets.';
+					#end
+				} else {
+					if (ktx2.header.supercompressionScheme != hxd.res.Ktx2.SuperCompressionScheme.NONE)
+						throw 'KTX2 supercompression ${ktx2.header.supercompressionScheme} is not supported for vkFormat textures (${entry.path})';
+					inf.pixelFormat = pixelFormatFromKtx2VkFormat(ktx2.header.vkFormat);
+					inf.dataFormat = Ktx2;
 				}
-			#end
 
 			case 0x3F23: // HDR RADIANCE
 
@@ -480,6 +482,18 @@ class Image extends Resource {
 			case Hdr:
 				var data = hxd.fmt.hdr.Reader.decode(entry.getBytes(), false);
 				pixels = new hxd.Pixels(data.width, data.height, data.bytes, inf.pixelFormat);
+			case Ktx2:
+				if (inf.ktx2Levels == null)
+					throw 'Missing ktx2 level information for ${entry.path}';
+				var mipLevel = index + inf.mipOffset;
+				var level = hxd.res.Ktx2.getLevel(inf.ktx2Levels, mipLevel);
+				var w = inf.width >> (mipLevel - inf.mipOffset);
+				var h = inf.height >> (mipLevel - inf.mipOffset);
+				if (w == 0)
+					w = 1;
+				if (h == 0)
+					h = 1;
+				pixels = new hxd.Pixels(w, h, entry.fetchBytes(level.byteOffset, level.byteLength), inf.pixelFormat);
 			case Ktx2ETC1S, Ktx2UASTC:
 				var bytes = entry.getBytes();
 				pixels = new hxd.Pixels(inf.width, inf.height, bytes, inf.pixelFormat);
@@ -577,6 +591,48 @@ class Image extends Resource {
 			tex.waitLoads = null;
 			for (f in arr)
 				f();
+		}
+	}
+
+	static function pixelFormatFromTranscoderFormat(transcoderFormat:Int):hxd.PixelFormat {
+		return switch transcoderFormat {
+			case TranscoderFormat.ASTC_4x4: hxd.PixelFormat.ASTC(10);
+			case TranscoderFormat.BC7_M5: hxd.PixelFormat.S3TC(7);
+			case TranscoderFormat.BC1: hxd.PixelFormat.S3TC(1);
+			case TranscoderFormat.BC3: hxd.PixelFormat.S3TC(3);
+			case TranscoderFormat.ETC1: hxd.PixelFormat.ETC(0);
+			case TranscoderFormat.ETC2: hxd.PixelFormat.ETC(1);
+			case TranscoderFormat.RGBA32: hxd.PixelFormat.RGBA;
+			case TranscoderFormat.RGBA_HALF: hxd.PixelFormat.RGBA16F;
+			default:
+				throw 'Unsupported transcoder format: ${transcoderFormat}';
+		}
+	}
+
+	static function pixelFormatFromKtx2VkFormat(vkFormat:Int):hxd.PixelFormat {
+		return switch vkFormat {
+			// BC1
+			case 131, 132, 133, 134: hxd.PixelFormat.S3TC(1);
+			// BC2
+			case 135, 136: hxd.PixelFormat.S3TC(2);
+			// BC3
+			case 137, 138: hxd.PixelFormat.S3TC(3);
+			// BC6H
+			case 143, 144: hxd.PixelFormat.S3TC(6);
+			// BC7
+			case 145, 146: hxd.PixelFormat.S3TC(7);
+			// ETC2 RGB
+			case 147, 148: hxd.PixelFormat.ETC(0);
+			// ETC2 RGBA
+			case 151, 152: hxd.PixelFormat.ETC(1);
+			// ASTC 4x4
+			case 157, 158: hxd.PixelFormat.ASTC(10);
+			// RGBA8
+			case 37, 43: hxd.PixelFormat.RGBA;
+			// RGBA16F
+			case 97: hxd.PixelFormat.RGBA16F;
+			default:
+				throw 'No heaps pixel format mapping for ktx2 vkFormat ${vkFormat}';
 		}
 	}
 
@@ -704,6 +760,23 @@ class Image extends Resource {
 							pos += size;
 						}
 					}
+			case Ktx2:
+				if (inf.ktx2Levels == null)
+					throw 'Missing ktx2 level information for ${entry.path}';
+				var bytes = asyncData == null ? entry.getBytes() : asyncData;
+				for (layer in 0...tex.layerCount) {
+					for (mip in 0...inf.mipLevels) {
+						var mipLevel = mip + inf.mipOffset;
+						var level = hxd.res.Ktx2.getLevel(inf.ktx2Levels, mipLevel);
+						var w = inf.width >> mip;
+						var h = inf.height >> mip;
+						if (w == 0)
+							w = 1;
+						if (h == 0)
+							h = 1;
+						tex.uploadPixels(new hxd.Pixels(w, h, bytes, inf.pixelFormat, level.byteOffset), mip, layer);
+					}
+				}
 			case Ktx2ETC1S, Ktx2UASTC:
 				for (layer in 0...asyncMessage.faces.length) {
 					final face = asyncMessage.faces[layer];

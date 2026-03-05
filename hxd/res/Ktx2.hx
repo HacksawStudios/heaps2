@@ -55,7 +55,10 @@ class Ktx2 {
 	public static function readFile(bytes:haxe.io.BytesInput):Ktx2File {
 		final header = readHeader(bytes);
 		final levels = readLevels(bytes, header.levelCount);
+		var dfdPos = bytes.position;
+		bytes.position = header.dfdByteOffset;
 		final dfd = readDfd(bytes);
+		bytes.position = dfdPos;
 		final file:Ktx2File = {
 			header: header,
 			levels: levels,
@@ -64,6 +67,17 @@ class Ktx2 {
 			supercompressionGlobalData: null,
 		}
 		return file;
+	}
+
+	/**
+		Returns the level descriptor for a given mip level.
+		KTX2 stores level data from smallest mip to largest mip.
+	**/
+	public static inline function getLevel(levels:Array<KTX2Level>, mipLevel:Int):KTX2Level {
+		var idx = levels.length - 1 - mipLevel;
+		if (idx < 0 || idx >= levels.length)
+			throw 'Invalid ktx2 mip level $mipLevel (levels=${levels.length})';
+		return levels[idx];
 	}
 
 	public static function readHeader(bytes:haxe.io.BytesInput):KTX2Header {
@@ -133,28 +147,25 @@ class Ktx2 {
 
 	static function readLevels(bytes:haxe.io.BytesInput, levelCount:Int):Array<KTX2Level> {
 		levelCount = hxd.Math.imax(1, levelCount);
-		final length = levelCount * 3 * (2 * 4);
-		final level = bytes.read(length);
 		final levels:Array<KTX2Level> = [];
-
-		while (levelCount-- > 0) {
+		for (i in 0...levelCount) {
 			levels.push({
 				byteOffset: {
-					final val = level.getInt64(0);
+					final val = bytes.read(8).getInt64(0);
 					if (val.high > 0) {
 						throw BYTE_INDEX_ERROR;
 					}
 					val.low;
 				},
 				byteLength: {
-					final val = level.getInt64(8);
+					final val = bytes.read(8).getInt64(0);
 					if (val.high > 0) {
 						throw BYTE_INDEX_ERROR;
 					}
 					val.low;
 				},
 				uncompressedByteLength: {
-					final val = level.getInt64(16);
+					final val = bytes.read(8).getInt64(0);
 					if (val.high > 0) {
 						throw BYTE_INDEX_ERROR;
 					}
