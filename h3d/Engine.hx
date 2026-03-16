@@ -1,6 +1,4 @@
 package h3d;
-import h3d.mat.Data;
-
 private class TargetTmp {
 	public var t : h3d.mat.Texture;
 	public var textures : Array<h3d.mat.Texture>;
@@ -68,6 +66,9 @@ class Engine {
 	var inRender = false;
 	public var ready(default,null) = false;
 	@:allow(hxd.res) var resCache = new Map<{},Dynamic>();
+
+	var pendingResizeWidth : Int = -1;
+	var pendingResizeHeight : Int = -1;
 
 	public static var SOFTWARE_DRIVER = false;
 	public static var ANTIALIASING = 0;
@@ -269,9 +270,10 @@ class Engine {
 	function onWindowResize() {
 		if( autoResize && !driver.isDisposed() ) {
 			var w = window.width, h = window.height;
-			if( w != width || h != height )
-				resize(w, h);
-			onResized();
+			if( w != width || h != height ) {
+				pendingResizeWidth = w;
+				pendingResizeHeight = h;
+			}
 		}
 	}
 
@@ -293,11 +295,19 @@ class Engine {
 		this.width = width;
 		this.height = height;
 		if( !driver.isDisposed() ) driver.resize(width, height);
+		onResized();
 	}
 
 	public function begin() {
 		if( driver.isDisposed() )
 			return false;
+
+		if( pendingResizeWidth > 0 && pendingResizeHeight > 0 ) {
+			resize(pendingResizeWidth, pendingResizeHeight);
+			pendingResizeWidth = -1;
+			pendingResizeHeight = -1;
+		}
+		
 		// init
 		inRender = true;
 		drawTriangles = 0;
