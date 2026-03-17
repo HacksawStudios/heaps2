@@ -461,6 +461,7 @@ class Ktx2Decoder {
 			final workerScript = '
 			let config;
 			let transcoderPending;
+			let formatInfo;
 			let BasisModule;
 			// Inject the basis transcoder script into the workers context
 			${_transcoderScript}
@@ -473,9 +474,10 @@ class Ktx2Decoder {
 						init(message.transcoderBinary);
 						break;
 					case "transcode":
+						formatInfo = message.formatInfo;
 						transcoderPending.then(function() {
 							try {
-								const { faces, buffers, width, height, hasAlpha, format, type, dfdFlags } = transcode( message.buffer, message.formatInfo );
+								const { faces, buffers, width, height, hasAlpha, format, type, dfdFlags } = transcode( message.buffer );
 								self.postMessage( { type: "transcode", id: message.id, data: { faces, width, height, hasAlpha, format, type, dfdFlags } }, buffers );
 							} catch (error) {
 								self.postMessage({ type: "error", id: message.id, error: error.message });
@@ -512,7 +514,7 @@ class Ktx2Decoder {
 				return result;
 			}
 
-			function transcode(buffer, formatInfo) {
+			function transcode(buffer) {
 				let ktx2File = new BasisModule.KTX2File(new Uint8Array(buffer));
 				function cleanup() {
 					ktx2File.close();

@@ -1029,7 +1029,7 @@ class GlDriver extends Driver {
 		case GL.RGB10_A2: GL.RGBA;
 		case GL.RED, GL.R8, GL.R16F, GL.R32F, 0x822A: GL.RED;
 		case GL.RG, GL.RG8, GL.RG16F, GL.RG32F, 0x822C: GL.RG;
-			case GL.RGB16F, GL.RGB32F, 0x8054, 0x8E8F, 0x8D64, 0x9274: GL.RGB;
+		case GL.RGB16F, GL.RGB32F, 0x8054, 0x8E8F, 0x8D64: GL.RGB;
 		case 0x805B,
 			0x83F1, // DXT1
 			0x83F2, // DXT3
@@ -1050,7 +1050,7 @@ class GlDriver extends Driver {
 		case R8, RG8, RGB8, R16F, RG16F, RGB16F, R32F, RG32F, RGB32F, RG11B10UF, RGB10A2: #if js glES >= 3 #else true #end;
 		case S3TC(n): n <= maxCompressedTexturesSupport;
 		case ASTC(10): #if js textureSupport != null && textureSupport.astc #else true #end;
-			case ETC(0): #if js textureSupport != null && (textureSupport.etc1 || textureSupport.etc2) #else true #end;
+		case ETC(0): #if js textureSupport != null && textureSupport.etc1 #else true #end;
 		case ETC(1), ETC(2): #if js textureSupport != null && textureSupport.etc2 #else true #end;
 		default: false;
 		}
@@ -1164,14 +1164,7 @@ class GlDriver extends Driver {
 				if( t.width&3 != 0 || t.height&3 != 0 )
 					throw "Compressed texture "+t+" has size "+t.width+"x"+t.height+" - must be a multiple of 4";
 				switch( n ) {
-				case 0:
-					#if js
-					// WEBGL_compressed_texture_etc1 is not available in WebGL2; use ETC2 RGB8 fallback.
-					if( textureSupport != null && !textureSupport.etc1 && textureSupport.etc2 )
-						tt.internalFmt = 0x9274; // ETC2 RGB8
-					else
-					#end
-					tt.internalFmt = 0x8D64; // ETC1
+				case 0: tt.internalFmt = 0x8D64; // ETC1
 				case 1, 2: tt.internalFmt = 0x9278; // ETC2 RGBA8
 				default: throw "Unsupported texture format "+t.format;
 				}
