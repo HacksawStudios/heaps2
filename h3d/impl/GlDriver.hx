@@ -1143,38 +1143,38 @@ class GlDriver extends Driver {
 			tt.internalFmt = GL.R11F_G11F_B10F;
 			tt.pixelFmt = GL.UNSIGNED_INT_10F_11F_11F_REV;
 		case S3TC(n) if( n <= maxCompressedTexturesSupport ):
-				if( t.width&3 != 0 || t.height&3 != 0 )
-					throw "Compressed texture "+t+" has size "+t.width+"x"+t.height+" - must be a multiple of 4";
-				switch( n ) {
-				case 1: tt.internalFmt = 0x83F1; // COMPRESSED_RGBA_S3TC_DXT1_EXT
-				case 2: tt.internalFmt = 0x83F2; // COMPRESSED_RGBA_S3TC_DXT3_EXT
-				case 3: tt.internalFmt = 0x83F3; // COMPRESSED_RGBA_S3TC_DXT5_EXT
-				case 6: tt.internalFmt = 0x8E8F; // COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT
-				case 7: tt.internalFmt = 0x8E8C; // COMPRESSED_RGBA_BPTC_UNORM
-				default: throw "Unsupported texture format "+t.format;
-				}
+			if( t.width&3 != 0 || t.height&3 != 0 )
+				throw "Compressed texture "+t+" has size "+t.width+"x"+t.height+" - must be a multiple of 4";
+			switch( n ) {
+			case 1: tt.internalFmt = 0x83F1; // COMPRESSED_RGBA_S3TC_DXT1_EXT
+			case 2: tt.internalFmt = 0x83F2; // COMPRESSED_RGBA_S3TC_DXT3_EXT
+			case 3: tt.internalFmt = 0x83F3; // COMPRESSED_RGBA_S3TC_DXT5_EXT
+			case 6: tt.internalFmt = 0x8E8F; // COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT
+			case 7: tt.internalFmt = 0x8E8C; // COMPRESSED_RGBA_BPTC_UNORM
+			default: throw "Unsupported texture format "+t.format;
+			}
 		case ASTC(n):
-				if( t.width&3 != 0 || t.height&3 != 0 )
-					throw "Compressed texture "+t+" has size "+t.width+"x"+t.height+" - must be a multiple of 4";
-				switch( n ) {
-				case 10: tt.internalFmt = 0x93B0; // COMPRESSED_RGBA_ASTC_4x4_KHR
-				default: throw "Unsupported texture format "+t.format;
-				}
+			if( t.width&3 != 0 || t.height&3 != 0 )
+				throw "Compressed texture "+t+" has size "+t.width+"x"+t.height+" - must be a multiple of 4";
+			switch( n ) {
+			case 10: tt.internalFmt = 0x93B0; // COMPRESSED_RGBA_ASTC_4x4_KHR
+			default: throw "Unsupported texture format "+t.format;
+			}
 		case ETC(n):
-				if( t.width&3 != 0 || t.height&3 != 0 )
-					throw "Compressed texture "+t+" has size "+t.width+"x"+t.height+" - must be a multiple of 4";
-				switch( n ) {
-				case 0:
-					#if js
-					// WEBGL_compressed_texture_etc1 is not available in WebGL2; use ETC2 RGB8 fallback.
-					if( textureSupport != null && !textureSupport.etc1 && textureSupport.etc2 )
-						tt.internalFmt = 0x9274; // ETC2 RGB8
-					else
-					#end
-					tt.internalFmt = 0x8D64; // ETC1
-				case 1, 2: tt.internalFmt = 0x9278; // ETC2 RGBA8
-				default: throw "Unsupported texture format "+t.format;
-				}
+			if( t.width&3 != 0 || t.height&3 != 0 )
+				throw "Compressed texture "+t+" has size "+t.width+"x"+t.height+" - must be a multiple of 4";
+			switch( n ) {
+			case 0:
+				#if js
+				// WEBGL_compressed_texture_etc1 is not available in WebGL2; use ETC2 RGB8 fallback.
+				if( textureSupport != null && !textureSupport.etc1 && textureSupport.etc2 )
+					tt.internalFmt = 0x9274; // ETC2 RGB8
+				else
+				#end
+				tt.internalFmt = 0x8D64; // ETC1
+			case 1, 2: tt.internalFmt = 0x9278; // ETC2 RGBA8
+			default: throw "Unsupported texture format "+t.format;
+			}
 		default:
 			throw "Unsupported texture format "+t.format;
 		}
