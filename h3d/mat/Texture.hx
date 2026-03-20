@@ -61,6 +61,11 @@ class Texture {
 	**/
 	public var depthBuffer : Texture;
 
+	/**
+		Whether the texture data uses premultiplied alpha. Set from KTX2 DFD flags during loading.
+	**/
+	public var premultipliedAlpha : Bool = false;
+
 	var tmpColor : h3d.Vector4;
 
 	function set_lastFrame(lf:Int) {

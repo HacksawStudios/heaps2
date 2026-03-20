@@ -788,6 +788,7 @@ class Image extends Resource {
 					});
 					return;
 				}
+				tex.premultipliedAlpha = asyncMessage.dfdFlags & 1 == 1;
 				for (layer in 0...asyncMessage.faces.length) {
 					final face = asyncMessage.faces[layer];
 					for (mip in 0...face.mipmaps.length) {

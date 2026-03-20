@@ -393,6 +393,7 @@ class Ktx2Decoder {
 			default:
 				throw 'Ktx2Loader: No supported format available.';
 		}
+		texture.premultipliedAlpha = data.dfdFlags & 1 == 1;
 		return texture;
 	}
 	#end
