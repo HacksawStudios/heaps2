@@ -67,9 +67,10 @@ class Engine {
 	public var ready(default,null) = false;
 	@:allow(hxd.res) var resCache = new Map<{},Dynamic>();
 
+	#if delay_canvas_resize
 	var pendingResizeWidth : Int = -1;
 	var pendingResizeHeight : Int = -1;
-
+	#end
 	public static var SOFTWARE_DRIVER = false;
 	public static var ANTIALIASING = 0;
 
@@ -267,6 +268,7 @@ class Engine {
 	public dynamic function onReady() {
 	}
 
+	#if delay_canvas_resize
 	function onWindowResize() {
 		if( autoResize && !driver.isDisposed() ) {
 			var w = window.width, h = window.height;
@@ -276,6 +278,17 @@ class Engine {
 			}
 		}
 	}
+	#else
+	function onWindowResize() {
+		if( autoResize && !driver.isDisposed() ) {
+			var w = window.width, h = window.height;
+			if( w != width || h != height )
+				resize(w, h);
+			onResized();
+		}
+	}
+	#end
+
 
 	function set_fullScreen(v) {
 		fullScreen = v;
@@ -295,18 +308,22 @@ class Engine {
 		this.width = width;
 		this.height = height;
 		if( !driver.isDisposed() ) driver.resize(width, height);
+		#if delay_canvas_resize
 		onResized();
+		#end	
 	}
 
 	public function begin() {
 		if( driver.isDisposed() )
 			return false;
 
+		#if delay_canvas_resize
 		if( pendingResizeWidth > 0 && pendingResizeHeight > 0 ) {
 			resize(pendingResizeWidth, pendingResizeHeight);
 			pendingResizeWidth = -1;
 			pendingResizeHeight = -1;
 		}
+		#end
 		
 		// init
 		inRender = true;
