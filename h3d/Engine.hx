@@ -264,18 +264,21 @@ class Engine {
 
 	public dynamic function onContextLost() {
 	}
-
+	
 	public dynamic function onReady() {
 	}
-
+	
 	#if delay_canvas_resize
+	public function queueResize(w, h){
+		if( w != this.width || h != this.height ) {
+			pendingResizeWidth = w;
+			pendingResizeHeight = h;
+		}
+	}
 	function onWindowResize() {
 		if( autoResize && !driver.isDisposed() ) {
 			var w = window.width, h = window.height;
-			if( w != width || h != height ) {
-				pendingResizeWidth = w;
-				pendingResizeHeight = h;
-			}
+			queueResize(w,h);
 		}
 	}
 	#else
