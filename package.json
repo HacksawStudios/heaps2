@@ -1,23 +1,23 @@
 {
-   "name": "@hacksawstudios/heaps",
-   "version": "2.1.14",
-   "description": "_High Performance Game Framework_",
-   "main": "index.js",
-   "devDependencies": {
-      "@hacksawstudios/haxe-module-installer": "1.2.12"
-   },
-   "scripts": {
-      "postinstall": "npx @hacksawstudios/haxe-module-installer",
-      "test": "echo \"Error: no test specified\" && exit 1"
-   },
-   "repository": {
-      "type": "git",
-      "url": "git+https://github.com/HacksawStudios/heaps.git"
-   },
-   "author": "",
-   "license": "ISC",
-   "bugs": {
-      "url": "https://github.com/HacksawStudios/heaps/issues"
-   },
-   "homepage": "https://github.com/HacksawStudios/heaps#readme"
+  "name": "@hacksawstudios/heaps",
+  "version": "2.1.16",
+  "description": "_High Performance Game Framework_",
+  "main": "index.js",
+  "devDependencies": {
+    "@hacksawstudios/haxe-module-installer": "1.2.12"
+  },
+  "scripts": {
+    "postinstall": "npx @hacksawstudios/haxe-module-installer",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HacksawStudios/heaps.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/HacksawStudios/heaps/issues"
+  },
+  "homepage": "https://github.com/HacksawStudios/heaps#readme"
 }
