@@ -1,7 +1,7 @@
 package hxd.res;
 
-import haxe.io.UInt8Array;
 import h3d.mat.Data.TextureFlags;
+import haxe.io.UInt8Array;
 using Lambda;
 
 #if js
