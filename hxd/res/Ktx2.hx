@@ -1,7 +1,7 @@
 package hxd.res;
 
-import haxe.io.UInt8Array;
 import h3d.mat.Data.TextureFlags;
+import haxe.io.UInt8Array;
 using Lambda;
 
 #if js
@@ -387,6 +387,7 @@ class Ktx2Decoder {
 		final texture = switch (data.format) {
 			case EngineFormat.RGBA_ASTC_4x4_Format: create(hxd.PixelFormat.ASTC(10));
 			case EngineFormat.RGBA_BPTC_Format: create(hxd.PixelFormat.S3TC(7));
+			case EngineFormat.RGB_S3TC_DXT1_Format: create(hxd.PixelFormat.S3TC(1));
 			case EngineFormat.RGBA_S3TC_DXT5_Format: create(hxd.PixelFormat.S3TC(3));
 			case EngineFormat.RGB_ETC1_Format: create(hxd.PixelFormat.ETC(0));
 			case EngineFormat.RGBA_ETC2_EAC_Format: create(hxd.PixelFormat.ETC(1));
