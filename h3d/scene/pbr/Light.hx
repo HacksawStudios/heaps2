@@ -1,10 +1,19 @@
 package h3d.scene.pbr;
 
+enum LightUnit {
+	Unitless;
+	Lumen;
+	Candela;
+	Lux;
+}
+
 class Light extends h3d.scene.Light {
 
 	var _color : h3d.Vector;
 	var primitive : h3d.prim.Primitive;
 	public var power : Float = 1.;
+	public var unit : LightUnit = Unitless;
+	public var inverseSquareFalloff : Bool = false;
 	public var shadows : h3d.pass.Shadows;
 	public var isMainLight = false;
 	public var occlusionFactor : Float = 0.;
@@ -29,7 +38,7 @@ class Light extends h3d.scene.Light {
 			ctx.setGlobal("mainLightPos",new h3d.Vector(absPos.tx, absPos.ty, absPos.tz));
 			ctx.setGlobal("mainLightDir", absPos.front());
 			ctx.setGlobal("mainLightShadowMap", shadows.getShadowTex());
-			ctx.setGlobal("mainLightViewProj", shadows.getShadowProj());
+			ctx.setGlobal("mainLightViewProj", shadows.getShadowViewProj());
 		}
 	}
 
@@ -41,7 +50,37 @@ class Light extends h3d.scene.Light {
 		return _color = v;
 	}
 
+	public function getIntensity() : Float {
+		return switch( unit ) {
+		case Unitless: getUnitlessIntensity();
+		case Lumen: power * getCandelaPerLumen();
+		case Candela, Lux: power;
+		}
+	}
+
+	function getUnitlessIntensity() : Float {
+		return power * power;
+	}
+
+	function getCandelaPerLumen() : Float {
+		return 1 / (4 * Math.PI);
+	}
+
+	function hasInverseSquareFalloff() {
+		return inverseSquareFalloff || unit != Unitless;
+	}
+
 	public function inFrustum(frustum : h3d.col.Frustum) {
 		return true;
+	}
+
+	function getParentScale() {
+		var minScale = 1.0;
+		var p = parent;
+		while (p != null) {
+			minScale *= hxd.Math.min(p.scaleX, hxd.Math.min(p.scaleY, p.scaleZ));
+			p = p.parent;
+		}
+		return minScale;
 	}
 }

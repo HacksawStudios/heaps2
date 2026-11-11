@@ -1,0 +1,158 @@
+package h3d.pass;
+
+class ProjectedShadowMap extends Shadows {
+
+	var sshader : h3d.shader.SpotShadow;
+	var mergePass = new h3d.pass.ScreenFx(new h3d.shader.MinMaxShader());
+
+	public function new( light : h3d.scene.Light ) {
+		format = R32F;
+		super(light);
+		lightCamera = new h3d.Camera();
+		lightCamera.screenRatio = 1.0;
+		lightCamera.zNear = 0.01;
+		shader = sshader = new h3d.shader.SpotShadow();
+	}
+
+	function targetName() : String {
+		return "projectedShadowMap";
+	}
+
+	function updateCamera() {
+	}
+
+	override function set_mode(m:Shadows.RenderMode) {
+		sshader.enable = m != None && enabled;
+		return mode = m;
+	}
+
+	override function set_enabled(b:Bool) {
+		sshader.enable = b && mode != None;
+		return enabled = b;
+	}
+
+	public override function getShadowTex() {
+		return sshader.shadowMap;
+	}
+
+	override function syncShader(texture) {
+		sshader.shadowMap = texture;
+		sshader.shadowBias = bias;
+		sshader.shadowViewProj = getShadowViewProj();
+		sshader.SAMPLING_MODE = samplingKind;
+		//ESM
+		sshader.shadowPower = power;
+
+		// PCF
+		sshader.pcfScale = pcfScale / texture.width;
+	}
+
+	override function saveStaticData() {
+		if( mode != Mixed && mode != Static )
+			return null;
+		if( staticTexture == null )
+			throw "Data not computed";
+		var bytes = haxe.zip.Compress.run(staticTexture.capturePixels().bytes,9);
+		var buffer = new haxe.io.BytesBuffer();
+		buffer.addInt32(staticTexture.width);
+		buffer.addInt32(bytes.length);
+		buffer.add(bytes);
+		return buffer.getBytes();
+	}
+
+	function createStaticTexture() : h3d.mat.Texture {
+		if( staticTexture != null && staticTexture.width == size && staticTexture.width == size && staticTexture.format == format )
+			return staticTexture;
+		if( staticTexture != null )
+			staticTexture.dispose();
+		staticTexture = new h3d.mat.Texture(size, size, [Target], format);
+		staticTexture.name = "staticTexture";
+		staticTexture.preventAutoDispose();
+		staticTexture.realloc = null;
+		return staticTexture;
+	}
+
+	override function loadStaticData( bytes : haxe.io.Bytes ) {
+		if( (mode != Mixed && mode != Static) || bytes == null )
+			return false;
+		var buffer = new haxe.io.BytesInput(bytes);
+		var size = buffer.readInt32();
+		if( size != this.size )
+			return false;
+		var len = buffer.readInt32();
+		var data = haxe.zip.Uncompress.run(buffer.read(len));
+		if( data.length != hxd.Pixels.calcDataSize(size, size, format) )
+			return false;
+		createStaticTexture().uploadPixels(new hxd.Pixels(size, size, data, format));
+		updateCamera();
+		syncShader(staticTexture);
+		return true;
+	}
+
+	override function draw( passes : h3d.pass.PassList, ?sort ) {
+		if( !enabled )
+			return;
+
+		updateCamera();
+		if( !filterPasses(passes) )
+			return;
+
+		cullPasses(passes, function(col) return col.inFrustum(lightCamera.frustum));
+
+		var prevFar = @:privateAccess ctx.cameraFar;
+		var prevPos = @:privateAccess ctx.cameraPos;
+		var prevView = @:privateAccess ctx.cameraView;
+		var prevProj = @:privateAccess ctx.cameraProj;
+		var prevViewProj = @:privateAccess ctx.cameraViewProj;
+		@:privateAccess ctx.cameraView = getShadowView();
+		@:privateAccess ctx.cameraProj = getShadowProj();
+		@:privateAccess ctx.cameraViewProj = getShadowViewProj();
+		@:privateAccess ctx.cameraFar = lightCamera.zFar;
+		@:privateAccess ctx.cameraPos = lightCamera.pos;
+
+		var computingStatic = ctx.computingStatic || updateStatic;
+
+		var texture = ctx.textures.allocTarget(targetName(), size, size, false, Depth32);
+		texture.filter = Nearest;
+		ctx.engine.pushDepth(texture);
+		ctx.engine.clear(null, 1);
+		super.draw(passes, sort);
+		ctx.engine.popTarget();
+
+		if( computingStatic || blur.radius > 0 ) {
+			var tmp = computingStatic ? createStaticTexture() : ctx.textures.allocTarget(targetName() + "Float", size, size, false, format);
+			h3d.pass.Copy.run(texture, tmp);
+			texture = tmp;
+		}
+
+		if( blur.radius > 0 )
+			blur.apply(ctx, texture);
+
+		if( mode == Mixed && !computingStatic && staticTexture != null && !staticTexture.isDisposed() ) {
+			if ( staticTexture.width != texture.width )
+				throw "Static shadow map doesnt match dynamic shadow map";
+			var merge = ctx.textures.allocTarget("merged_" + targetName(), size, size, false, format);
+			mergePass.shader.texA = texture;
+			mergePass.shader.texB = staticTexture;
+			ctx.engine.pushTarget(merge);
+			mergePass.render();
+			ctx.engine.popTarget();
+			texture = merge;
+		}
+		@:privateAccess ctx.cameraFar = prevFar;
+		@:privateAccess ctx.cameraPos = prevPos;
+		@:privateAccess ctx.cameraView = prevView;
+		@:privateAccess ctx.cameraProj = prevProj;
+		@:privateAccess ctx.cameraViewProj = prevViewProj;
+
+		syncShader(texture);
+
+		updateStatic = false;
+	}
+
+	override function computeStatic( passes : h3d.pass.PassList ) {
+		if( mode != Static && mode != Mixed )
+			return;
+		draw(passes);
+	}
+}

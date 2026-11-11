@@ -15,6 +15,20 @@ private class TargetTmp {
 	}
 }
 
+#if js
+// ObjectMap can't key strings in ES5 : native Map compares strings by value
+private abstract ResCache(js.lib.Map<{},Dynamic>) {
+	public inline function new() this = new js.lib.Map();
+	public inline function get( k : {} ) : Dynamic return this.get(k);
+	public inline function set( k : {}, v : Dynamic ) this.set(k, v);
+	public inline function exists( k : {} ) return this.has(k);
+	public inline function remove( k : {} ) return this.delete(k);
+	public inline function iterator() return this.iterator();
+}
+#else
+private typedef ResCache = Map<{},Dynamic>;
+#end
+
 enum DepthBinding {
 	ReadWrite;
 	ReadOnly;
@@ -64,8 +78,9 @@ class Engine {
 	var nullTexture : h3d.mat.Texture;
 	var textureColorCache = new Map<Int,h3d.mat.Texture>();
 	var inRender = false;
+	public var shaderFailed(default, null) = false;
 	public var ready(default,null) = false;
-	@:allow(hxd.res) var resCache = new Map<{},Dynamic>();
+	@:allow(hxd.res) var resCache = new ResCache();
 
 	#if delay_canvas_resize
 	var pendingResizeWidth : Int = -1;
@@ -91,12 +106,11 @@ class Engine {
 		setCurrent();
 		#if macro
 		driver = new h3d.impl.NullDriver();
+		#elseif (js && dx12)
+		driver = h3d.impl.DX12Driver.inst ?? new h3d.impl.DX12Driver();
+		#elseif hlvk
+		driver = new h3d.impl.VulkanDriver();
 		#elseif (js || hlsdl || usegl)
-		#if (hlsdl && heaps_vulkan)
-		if( hxd.Window.USE_VULKAN )
-			driver = new h3d.impl.VulkanDriver();
-		else
-		#end
 		#if js
 		driver = js.Browser.supported ? new h3d.impl.GlDriver(antiAlias) : new h3d.impl.NullDriver();
 		#else
@@ -138,8 +152,23 @@ class Engine {
 	}
 
 	public function selectShader( shader : hxsl.RuntimeShader ) {
-		flushTarget();
-		if( driver.selectShader(shader) )
+		if( shader.mode != Compute )
+			flushTarget();
+		var onError = h3d.impl.RenderError.onRenderError;
+		shaderFailed = onError != null && shader.failed != null;
+		if( shaderFailed ) {
+			onError(Shader(shader), shader.failed);
+			return;
+		}
+		var switched = false;
+		if( onError == null )
+			switched = driver.selectShader(shader);
+		else try switched = driver.selectShader(shader) catch( e : haxe.Exception ) {
+			shaderFailed = true;
+			shader.failed = e.message;
+			onError(Shader(shader), shader.failed);
+		}
+		if( switched )
 			shaderSwitches++;
 	}
 
@@ -148,6 +177,8 @@ class Engine {
 	}
 
 	public function uploadInstanceShaderBuffers(buffers) {
+		if( shaderFailed )
+			return;
 		driver.flushShaderBuffers();
 		driver.uploadShaderBuffers(buffers, Params);
 		driver.uploadShaderBuffers(buffers, Textures);
@@ -155,6 +186,8 @@ class Engine {
 	}
 
 	public function uploadShaderBuffers(buffers, which) {
+		if( shaderFailed )
+			return;
 		driver.uploadShaderBuffers(buffers, which);
 	}
 
@@ -176,7 +209,7 @@ class Engine {
 
 	// we use preallocated indexes so all the triangles are stored inside our buffers
 	function renderBuffer( b : Buffer, indexes : Indexes, vertPerTri : Int, startTri = 0, drawTri = -1 ) {
-		if( indexes.isDisposed() )
+		if( shaderFailed || indexes.isDisposed() )
 			return;
 		var ntri = Std.int(b.vertices / vertPerTri);
 		if( drawTri < 0 )
@@ -193,7 +226,7 @@ class Engine {
 
 	// we use custom indexes, so the number of triangles is the number of indexes/3
 	public function renderIndexed( b : Buffer, indexes : Indexes, startTri = 0, drawTri = -1 ) {
-		if( indexes.isDisposed() )
+		if( shaderFailed || indexes.isDisposed() )
 			return;
 		var maxTri = Std.int(indexes.count / 3);
 		if( drawTri < 0 ) drawTri = maxTri - startTri;
@@ -206,6 +239,8 @@ class Engine {
 	}
 
 	public function renderMultiBuffers( format : hxd.BufferFormat.MultiFormat, buffers : Array<Buffer>, indexes : Indexes, startTri = 0, drawTri = -1 ) {
+		if( shaderFailed )
+			return;
 		var maxTri = Std.int(indexes.count / 3);
 		if( maxTri <= 0 ) return;
 		flushTarget();
@@ -222,13 +257,20 @@ class Engine {
 	}
 
 	public function renderInstanced( indexes : Indexes, commands : h3d.impl.InstanceBuffer ) {
-		if( indexes.isDisposed() )
+		if( shaderFailed || indexes.isDisposed() )
 			return;
 		if( commands.commandCount > 0 ) {
 			driver.drawInstanced(indexes, commands);
 			drawTriangles += commands.triCount;
 			drawCalls++;
 		}
+	}
+
+	public function computeDispatch( x = 1, y = 1, z = 1, barrier = true ) {
+		if( shaderFailed )
+			return;
+		driver.computeDispatch(x, y, z, barrier);
+		dispatches++;
 	}
 
 	function set_debug(d) {
@@ -339,6 +381,8 @@ class Engine {
 		#if (usesys && !macro)
 		haxe.System.beginFrame();
 		#end
+		mem.beginFrame();
+		driver.upscaling.latencyMarker(SimulationEnd);
 		driver.begin(hxd.Timer.frameCount);
 		if( backgroundColor != null ) clear(backgroundColor, 1, 0);
 		return true;
@@ -387,8 +431,8 @@ class Engine {
 		needFlushTarget = true;
 	}
 
-	public function pushDepth( depthBuffer : h3d.mat.Texture ) {
-		pushTarget(depthBuffer, DepthOnly);
+	public function pushDepth( depthBuffer : h3d.mat.Texture, layer = 0 ) {
+		pushTarget(depthBuffer, layer, 0, DepthOnly);
 	}
 
 	public function popTarget() {
@@ -415,7 +459,7 @@ class Engine {
 			currentTargetTex = null;
 		} else {
 			if ( t.depthBinding == DepthOnly )
-				driver.setDepth(t.t);
+				driver.setDepth(t.t, t.layer);
 			else if( t.textures != null )
 				driver.setRenderTargets(t.textures, t.depthBinding);
 			else
@@ -476,6 +520,7 @@ class Engine {
 
 	public function dispose() {
 		driver.dispose();
+		driver.removeEngine(this);
 		window.removeResizeEvent(onWindowResize);
 		if ( mem != null )
 			mem.dispose();

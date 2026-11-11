@@ -45,18 +45,21 @@ class Macros {
 			macro : Array<$t>;
 		case TChannel(_):
 			macro : hxsl.Types.TextureChannel;
-		case TFun(_):
+		case TFun(_), TEnum(_):
 			throw "assert";
 		case TBuffer(_):
 			macro : hxsl.Types.Buffer;
 		case TTextureHandle:
 			macro : hxsl.Types.TextureHandle;
+		case TBufferHandle:
+			macro : hxsl.Types.BufferHandle;
 		}
 	}
 
 	static function makeDef( t : Type, pos : Position ) : haxe.macro.Expr {
 		return switch( t ) {
 		case TFloat, TInt: macro 0;
+		case TBool: macro false;
 		case TVec(n, t):
 			switch( t ) {
 			case VFloat:
@@ -164,6 +167,8 @@ class Macros {
 			macro out[pos] = $eparam;
 		case TInt:
 			macro h3d.impl.RenderContext.fillIntParam(Std.int($eparam), pos, out);
+		case TBool:
+			macro out[pos] = $eparam ? 1.0 : 0.0;
 		case TVec(4, _):
 			macro {
 				var v : hxsl.Types.Vec4 = $eparam;
@@ -263,12 +268,17 @@ class Macros {
 				h3d.impl.RenderContext.fillIntParam(v.handle.low, pos++, out);
 				h3d.impl.RenderContext.fillIntParam(v.handle.high, pos++, out);
 			};
+		case TBufferHandle:
+			macro {
+				var v : h3d.BufferHandle = $eparam;
+				h3d.impl.RenderContext.fillIntParam(v.handle, pos++, out);
+			}
 		default:
 			macro super.writeParam(index, type, out, pos);
 		}
 	}
 
-	static function buildFields( shader : ShaderData, inits : Array<{ v : TVar, e : Ast.TExpr }>, pos : Position ) {
+	static function buildFields( shader : ShaderData, inits : Array<{ v : TVar, e : Ast.TExpr }>, enumTypes : Map<String,String>, pos : Position ) {
 		var fields = new Array<Field>();
 		var globals = [], consts = [], params = [], eparams = [], tparams = [];
 		var metas = [{ name : ":noCompletion", pos : pos }, { name : ":keep", pos : pos }];
@@ -278,10 +288,18 @@ class Macros {
 			switch( v.kind ) {
 			case Param:
 				var t = makeType(v.type);
+				// promote enum ints back to strict enum types
+				var en = v.getEnum();
+				var pt = t, enumExpr = null;
+				if( en != null ) {
+					var full = enumTypes.get(en.path);
+					pt = Context.toComplexType(Context.getType(full));
+					enumExpr = macro $p{full.split(".")};
+				}
 				var f : Field = {
 					name : v.name,
 					pos : pos,
-					kind : FProp("get","set", t),
+					kind : FProp("get","set", pt),
 					access : [APublic],
 					doc: v.getDoc(),
 				};
@@ -296,18 +314,20 @@ class Macros {
 					kind : FVar(t, initVal != null ? makeInit(initVal) : makeDef(v.type, pos)),
 					meta : metas,
 				};
+				var getValue = enumExpr != null ? macro std.Type.createEnumIndex($enumExpr, $i{ name }) : macro $i{ name };
+				var setValue = enumExpr != null ? macro { $i{ name } = std.Type.enumIndex(_v); _v; } : macro $i{ name } = _v;
 				var fget : Field = {
 					name : "get_" + v.name,
 					pos : pos,
 					kind : FFun( {
-						ret : t,
+						ret : pt,
 						args : [],
 						expr : if( consts.length == cpos || (consts.length == cpos+1 && consts[cpos].v == v) )
-							macro return $i{ name };
+							macro return $getValue;
 						else
 							macro {
 								constModified = true;
-								return $i{ name };
+								return $getValue;
 							},
 					}),
 					access : [AInline],
@@ -317,14 +337,14 @@ class Macros {
 					name : "set_" + v.name,
 					pos : pos,
 					kind : FFun( {
-						ret : t,
-						args : [ { name : "_v", type : t } ],
+						ret : pt,
+						args : [ { name : "_v", type : pt } ],
 						expr : if( consts.length == cpos )
-							macro return $i{ name } = _v;
+							macro return $setValue;
 						else
 							macro {
 								constModified = true;
-								return $i{ name } = _v;
+								return $setValue;
 							}
 					}),
 					access : [AInline],
@@ -504,6 +524,7 @@ class Macros {
 			cexpr.push(macro var s : $ctype = Type.createEmptyInstance($i { type } ));
 			cexpr.push(macro {
 				s.shader = shader;
+				s.priority = priority;
 			});
 			for( p in params ) {
 				cexpr.push(macro s.$p = $i{p});
@@ -532,14 +553,44 @@ class Macros {
 		return fields;
 	}
 
-	static function loadShader( path : String ) {
+	public static function makeParser( ?enumTypes : Map<String,String> ) {
+		var p = new MacroParser();
+		p.resolveEnum = function(t, pos) {
+			var type = try Context.resolveType(t, pos) catch( e : Dynamic ) null;
+			switch( type == null ? null : Context.follow(type) ) {
+			case TEnum(eref, []):
+				var en = eref.get();
+				for( n in en.names )
+					if( !en.constructs.get(n).type.match(TEnum(_)) )
+						Error.t("Enum " + en.name + "." + n + " has arguments and can't be used in a shader", pos);
+				// rewrite the source type to its full path, so @:import from another module can resolve it
+				var mpath = en.module.split(".");
+				switch( t ) {
+				case TPath(tp):
+					tp.name = mpath[mpath.length - 1];
+					tp.pack = mpath.slice(0, -1);
+					tp.sub = tp.name == en.name ? null : en.name;
+				default:
+				}
+				if( mpath[mpath.length - 1] != en.name ) mpath.push(en.name);
+				var path = en.pack.concat([en.name]).join(".");
+				if( enumTypes != null ) enumTypes.set(path, mpath.join("."));
+				return { path : path, constructors : en.names.copy() };
+			default:
+				return null;
+			}
+		};
+		return p;
+	}
+
+	static function loadShader( path : String, ?enumTypes ) {
 		var m = Context.follow(Context.getType(path));
 		switch( m ) {
 		case TInst(c, _):
 			var c = c.get();
 			for( m in c.meta.get() )
 				if( m.name == ":src" )
-					return new MacroParser().parseExpr(m.params[0]);
+					return makeParser(enumTypes).parseExpr(m.params[0]);
 		default:
 		}
 		throw path + " is not a shader";
@@ -556,9 +607,10 @@ class Macros {
 					if( !Lambda.has(f.access, AStatic) ) f.access.push(AStatic);
 					var cl = Context.getLocalClass();
 					var c = cl.get();
-					c.meta.add(":src", [expr], pos);
 					try {
-						var shader = new MacroParser().parseExpr(expr);
+						var enumTypes = new Map();
+						var shader = makeParser(enumTypes).parseExpr(expr);
+						c.meta.add(":src", [expr], pos);
 						var csup = c.superClass;
 						var supFields = new Map();
 						// add auto extends
@@ -581,7 +633,7 @@ class Macros {
 							csup = tsup.superClass;
 						} while( true);
 						var className = Std.string(cl);						var check = new Checker();
-						check.loadShader = loadShader;
+						check.loadShader = path -> loadShader(path, enumTypes);
 						check.warning = function(msg,pos) {
 							haxe.macro.Context.warning(msg, pos);
 						};
@@ -593,7 +645,7 @@ class Macros {
 							name : ":keep",
 							pos : pos,
 						});
-						for( f in buildFields(shader, check.inits, pos) )
+						for( f in buildFields(shader, check.inits, enumTypes, pos) )
 							if( !supFields.exists(f.name) )
 								fields.push(f);
 

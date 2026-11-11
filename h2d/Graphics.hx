@@ -144,9 +144,9 @@ private class GraphicsContent extends h3d.prim.Primitive {
 
 	public function clear() {
 		dispose();
-		tmp = new hxd.FloatBuffer();
-		index = new hxd.IndexBuffer();
-		buffers = [];
+		if( tmp == null ) tmp = new hxd.FloatBuffer() else tmp.resize(0);
+		if( index == null ) index = new hxd.IndexBuffer() else index.resize(0);
+		buffers.resize(0);
 	}
 
 }
@@ -164,6 +164,7 @@ class Graphics extends Drawable {
 
 	var content : GraphicsContent;
 	var tmpPoints : Array<GPoint>;
+	var gpool : Array<GPoint> = [];
 	var pindex : Int;
 	var curR : Float;
 	var curG : Float;
@@ -191,6 +192,7 @@ class Graphics extends Drawable {
 	var md : Float = 1.;
 	var mx : Float = 0.;
 	var my : Float = 0.;
+	var defaultTile : h2d.Tile;
 
 	/**
 		The Tile used as source of Texture to render.
@@ -211,7 +213,8 @@ class Graphics extends Drawable {
 	public function new(?parent) {
 		super(parent);
 		content = new GraphicsContent();
-		tile = h2d.Tile.fromColor(0xFFFFFF);
+		defaultTile = h2d.Tile.fromColor(0xFFFFFF);
+		tile = defaultTile;
 		clear();
 	}
 
@@ -225,7 +228,7 @@ class Graphics extends Drawable {
 	**/
 	public function clear() {
 		content.clear();
-		tmpPoints = [];
+		if( tmpPoints == null ) tmpPoints = [] else recyclePoints();
 		pindex = 0;
 		lineSize = 0;
 		xMin = Math.POSITIVE_INFINITY;
@@ -268,13 +271,13 @@ class Graphics extends Drawable {
 		var prev = pts[last];
 		var p = pts[0];
 
-		content.setTile(h2d.Tile.fromColor(0xFFFFFF));
+		content.setTile(defaultTile);
 		var closed = p.x == prev.x && p.y == prev.y;
 		var count = pts.length;
 		if( !closed ) {
 			var prevLast = pts[last - 1];
 			if( prevLast == null ) prevLast = p;
-			var gp = new GPoint();
+			var gp = allocPoint();
 			gp.load(prev.x * 2 - prevLast.x, prev.y * 2 - prevLast.y, 0, 0, 0, 0);
 			pts.push(gp);
 			var pNext = pts[1];
@@ -437,7 +440,17 @@ class Graphics extends Drawable {
 			if( content.next() )
 				pindex = 0;
 		}
-		tmpPoints = [];
+		recyclePoints();
+	}
+
+	inline function allocPoint() {
+		return gpool.length > 0 ? gpool.pop() : new GPoint();
+	}
+
+	inline function recyclePoints() {
+		for( p in tmpPoints )
+			gpool.push(p);
+		tmpPoints.resize(0);
 	}
 
 	/**
@@ -448,9 +461,9 @@ class Graphics extends Drawable {
 		@param color An RGB color with which to fill the drawn shapes.
 		@param alpha A transparency of the fill color.
 	**/
-	public function beginFill( color : Int = 0, alpha = 1.  ) {
+	public function beginFill( color : Int = 0, alpha = 1. ) {
 		flush();
-		tile = h2d.Tile.fromColor(0xFFFFFF);
+		tile = defaultTile;
 		content.setTile(tile);
 		setColor(color,alpha);
 		doFill = true;
@@ -609,7 +622,7 @@ class Graphics extends Drawable {
 			nsegments = Math.ceil(Math.abs(radius * hxd.Math.degToRad(90) / 4));
 		if( nsegments < 3 ) nsegments = 3;
 		var angle = hxd.Math.degToRad(90) / (nsegments - 1);
-		inline function corner(x, y, angleStart) {
+		inline function corner(x:Float, y:Float, angleStart) {
 		for ( i in 0...nsegments) {
 			var a = i * angle + hxd.Math.degToRad(angleStart);
 			lineTo(x + Math.cos(a) * radius, y + Math.sin(a) * radius);
@@ -848,7 +861,7 @@ class Graphics extends Drawable {
 		if( y > yMaxSize ) yMaxSize = y;
 		if( doFill )
 			content.add(x, y, u, v, r, g, b, a);
-		var gp = new GPoint();
+		var gp = allocPoint();
 		gp.load(x, y, lineR, lineG, lineB, lineA);
 		tmpPoints.push(gp);
 	}

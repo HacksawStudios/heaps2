@@ -32,6 +32,8 @@ class Window {
 	var eventTargets : List<Event -> Void>;
 	var dropTargets : List<DropFileEvent -> Void>;
 
+	public var x(get, never) : Int;
+	public var y(get, never) : Int;
 	public var width(get, never) : Int;
 	public var height(get, never) : Int;
 	public var mouseX(get, never) : Int;
@@ -68,6 +70,8 @@ class Window {
 
 	var focused : Bool;
 	var observer : Dynamic;
+
+	var lastPointerId : Int;
 
 	/**
 		When enabled, the browser zoom does not affect the canvas.
@@ -139,6 +143,8 @@ class Window {
 		element.addEventListener("keypress", onKeyPress);
 		element.addEventListener("blur", onFocus.bind(false));
 		element.addEventListener("focus", onFocus.bind(true));
+		element.addEventListener("pointerdown", onPointerDown);
+		element.addEventListener("pointerup", onPointerUp);
 
 		if ((js.Browser.window:Dynamic).ResizeObserver != null) {
 			// Modern solution for canvas resize monitoring, supported in most browsers, but not Haxe API.
@@ -193,12 +199,18 @@ class Window {
 
 	public function dispose() {
 		if( inst == this ) inst = null;
+		js.Browser.window.removeEventListener("resize", checkResize);
+		js.Browser.window.removeEventListener("mousemove", onMouseMove);
+		js.Browser.document.removeEventListener("pointerlockchange", onPointerLockChange);
 		if ((js.Browser.window:Dynamic).ResizeObserver != null) {
 			if (observer != null) {
 				observer.disconnect();
 				observer = null;
 			}
 		}
+	}
+
+	public function setIcon(icon: hxd.BitmapData) : Void {
 	}
 
 	public dynamic function onClose() : Bool {
@@ -245,6 +257,10 @@ class Window {
 
 	public function resize( width : Int, height : Int ) : Void {
 	}
+
+	public function setPosition(x: Int, y: Int) {
+	}
+
 
 	public function addDragAndDropTarget( f : ( event : DropFileEvent ) -> Void ) : Void {
 		if( dropTargets.length == 0 ) {
@@ -300,6 +316,20 @@ class Window {
 		if (emitEvent) event(new hxd.Event(EMove, x, y));
 	}
 
+	public function captureMouseEvents(enable: Bool) : Void {
+		if (lastPointerId < 0)
+			return;
+		if (enable) {
+			try {
+				canvas.setPointerCapture(lastPointerId);
+			} catch(e) {};
+		} else {
+			try {
+				canvas.releasePointerCapture(lastPointerId);
+			} catch(e) {};
+		}
+	}
+
 	public function setCurrent() {
 		inst = this;
 	}
@@ -312,6 +342,14 @@ class Window {
 
 	function getPixelRatio() {
 		return useScreenPixels ? Math.min(js.Browser.window.devicePixelRatio, maxPixelRatio) : 1;
+	}
+
+	function get_x() : Int {
+		return Math.round(canvasPos.left);
+	}
+
+	function get_y() : Int {
+		return Math.round(canvasPos.top);
 	}
 
 	function get_width() {
@@ -541,6 +579,14 @@ class Window {
 	function onFocus(b: Bool) {
 		event(new Event(b ? EFocus : EFocusLost));
 		focused = b;
+	}
+
+	function onPointerDown(e:js.html.PointerEvent) {
+		lastPointerId = e.pointerId;
+	}
+
+	function onPointerUp(e:js.html.PointerEvent) {
+		lastPointerId = -1;
 	}
 
 	function get_isFocused() : Bool return focused;

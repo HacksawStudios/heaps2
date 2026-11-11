@@ -14,10 +14,12 @@ class ShaderCache {
 	var sourceFile : String;
 	public var keepSource : Bool;
 	var mode : ShaderCacheMode;
+	var dirty = false;
+	public var allowSave = true;
 
-	inline static var VERSION_KEY_WORD = "VERSION";
-	inline static var VERSION = 1;
-	inline static var MODE_KEY_WORD = "MODE";
+	public static var VERSION_KEY_WORD = "VERSION";
+	public static var VERSION = 1;
+	public static var MODE_KEY_WORD = "MODE";
 
 	public function new( file : String, ?outputFile : String, mode = Base64) {
 		this.file = file;
@@ -26,8 +28,9 @@ class ShaderCache {
 		sourceFile = file + ".source";
 	}
 
+	@:deprecated("use allowSave = false")
 	public function disableSave() {
-		outputFile = null;
+		allowSave = false;
 	}
 
 	public function initEmpty() {
@@ -35,27 +38,33 @@ class ShaderCache {
 		sources = [];
 	}
 
-	function load() {
-		data = new Map();
+	public function load() {
+		initEmpty();
 		try loadFile(file) catch( e : Dynamic ) {};
 		if( outputFile != file ) try loadFile(outputFile) catch( e : Dynamic ) {};
 		if( keepSource ) try loadSources() catch( e : Dynamic ) {};
 	}
 
 	function loadFile( file : String ) {
-		#if !sys
+		#if !(sys || nodejs)
 		throw "Cannot load shader cache with this platform";
 		#else
 		if( !sys.FileSystem.exists(file) )
 			return;
 		var cache = new haxe.io.BytesInput(sys.io.File.getBytes(file));
 
+		var curPos = 0;
 		var hasVersion = cache.readString(VERSION_KEY_WORD.length) == VERSION_KEY_WORD;
-		var curPos = cache.position;
 		if ( !hasVersion )
-			cache.position = curPos = 0;
-		else
-			cache.readInt32();
+			cache.position = 0;
+		else {
+			var version = cache.readInt32();
+			if(version != VERSION) {
+				trace('Shader cache version $version, expected $VERSION, skipping');
+				return;
+			}
+			curPos = cache.position;
+		}
 
 		var hasMode = cache.readString(MODE_KEY_WORD.length) == MODE_KEY_WORD;
 		var mode = Base64;
@@ -71,7 +80,7 @@ class ShaderCache {
 		#end
 	}
 
-	#if sys
+	#if (sys || nodejs)
 	function loadCache(cache : haxe.io.BytesInput) {
 		while( cache.position < cache.length ) {
 			var len = cache.readInt32();
@@ -101,7 +110,7 @@ class ShaderCache {
 	#end
 
 	function loadSources() {
-		#if !sys
+		#if !(sys || nodejs)
 		throw "Cannot load shader cache with this platform";
 		#else
 		sources = new Map();
@@ -123,34 +132,77 @@ class ShaderCache {
 		#end
 	}
 
+	#if heaps_mt_hxsl_cache
+	var mutex = new sys.thread.Mutex();
+	#end
+	inline function lock() {
+		#if heaps_mt_hxsl_cache
+		mutex.acquire();
+		#end
+	}
+	inline function unlock() {
+		#if heaps_mt_hxsl_cache
+		mutex.release();
+		#end
+	}
+
 	public function resolveShaderBinary( source : String, ?configurationKey = "" ) {
-		if( data == null ) load();
 		var encodedSource = haxe.crypto.Md5.encode(source);
 		var key = configurationKey + encodedSource;
-		var bytes = data.get(key);
-		//if ( bytes == null )
-		//	trace("Can't found key : " + key);
-		return data.get(configurationKey + encodedSource);
-	}
-
-	public function saveCompiledShader( source : String, bytes : haxe.io.Bytes, ?configurationKey = "", ?saveToFile = true ) {
-		if( outputFile == null )
-			return;
+		lock();
 		if( data == null ) load();
-		var key = configurationKey + haxe.crypto.Md5.encode(source);
-		if( data.get(key) == bytes && (!keepSource || sources.get(key) == source) )
-			return;
-		//trace("Saving key : " + key);
-		data.set(key, bytes);
-		if( saveToFile )
-			save();
-		if( keepSource ) {
-			sources.set(key, source);
-			saveSources();
-		}
+		var bytes = data.get(key);
+		unlock();
+		return bytes;
 	}
 
-	function save() {
+	var saveTimer : haxe.Timer;
+	public function saveCompiledShader( source : String, bytes : haxe.io.Bytes, ?configurationKey = "", ?saveToFile = true ) {
+		var key = configurationKey + haxe.crypto.Md5.encode(source);
+		lock();
+		dirty = true;
+		if( data == null ) load();
+		if( data.get(key) == bytes && (!keepSource || sources.get(key) == source) ) {
+			unlock();
+			return;
+		}
+		data.set(key, bytes);
+		if( keepSource )
+			sources.set(key, source);
+		unlock();
+
+		if( !allowSave )
+			return;
+
+		#if heaps_mt_hxsl_cache
+		// Do save on main thread only
+		if( sys.thread.Thread.current() != sys.thread.Thread.main() ) {
+			haxe.EventLoop.main.run(() -> scheduleSave(saveToFile));
+			return;
+		}
+		#end
+		scheduleSave(saveToFile);
+	}
+
+	function scheduleSave( saveToFile : Bool ) {
+		if(saveTimer != null)
+			saveTimer.stop();
+		saveTimer = haxe.Timer.delay(function() {
+			if( saveToFile )
+				save();
+			if( keepSource )
+				saveSources();
+			saveTimer = null;
+		}, 100);
+	}
+
+	public function save() {
+		lock();
+		if( !dirty ) {
+			unlock();
+			return;
+		}
+		dirty = false;
 		var out = new haxe.io.BytesOutput();
 		var keys = Lambda.array({ iterator : data.keys });
 		keys.sort(Reflect.compare);
@@ -162,7 +214,8 @@ class ShaderCache {
 		case Base64: writeCache(keys, out);
 		case Binary: writeBinaryCache(keys, out);
 		}
-		#if sys
+		unlock();
+		#if (sys || nodejs)
 		try sys.io.File.saveBytes(outputFile, out.getBytes()) catch( e : Dynamic ) { trace("Something went wrong"); };
 		#end
 	}
@@ -191,6 +244,7 @@ class ShaderCache {
 
 	function saveSources() {
 		var out = new haxe.io.BytesOutput();
+		lock();
 		var keys = Lambda.array({ iterator : sources.keys });
 		keys.sort(Reflect.compare);
 		for( key in keys ) {
@@ -202,7 +256,8 @@ class ShaderCache {
 			out.writeByte('\n'.code);
 			out.writeByte('\n'.code);
 		}
-		#if sys
+		unlock();
+		#if (sys || nodejs)
 		try sys.io.File.saveBytes(sourceFile, out.getBytes()) catch( e : Dynamic ) {};
 		#end
 	}

@@ -14,7 +14,7 @@ class Texture {
 		The default texture color format
 	**/
 	public static var nativeFormat(default,never) : TextureFormat =
-		#if (usesys && !hldx && !hlsdl && !usegl && !macro)
+		#if (usesys && !hlvk && !hldx && !hlsdl && !usegl && !macro)
 			haxe.GraphicsDriver.nativeFormat
 		#else
 			RGBA
@@ -33,21 +33,34 @@ class Texture {
 	public var format(default, null) : TextureFormat;
 
 	var lastFrame(default,set) : Int;
-	var keepPriority : Int;
 	var bits : Int;
 	var waitLoads : Array<Void -> Void>;
 	@:bits(bits) public var mipMap : MipMap;
 	@:bits(bits) public var filter : Filter;
 	@:bits(bits) public var wrap : Wrap;
+	@:bits(bits, 11) public var slice : Int;
 	public var layerCount(get, never) : Int;
 	@:bits(bits, 4) var __startingMip : Int;
-	@:bits(bits, 16) var packedLodBias : Int;
+	@:bits(bits, 7) var packedLodBias : Int;
 	@:bits(bits, 4) var packedAnisotropicMaxLevel : Int = 15;
 	public var lodBias(get, set) : Float;
 	public var mipLevels(get, never) : Int;
 	public var anisotropicMaxLevel(get, set) : Int;
 	public var startingMip(get,set) : Int;
+	/**
+		The most detailed mip level allocated on the GPU : mip levels before it are not allocated,
+		and the texture is sampled starting at this level.
+	**/
+	public var residentMip(default,null) : Int = 0;
+	/**
+		For a Streamed texture, the last frame (hxd.Timer.frameCount) in which the texture was visible, see `markVisible`.
+	**/
+	public var visibleFrame(default,null) : Int = -1;
 	var customMipLevels : Int;
+	/**
+		A 1x1 texture is allocated while the texture is loading (see hxd.res.Image)
+	**/
+	var isPlaceholder : Bool;
 
 	/**
 		If this callback is set, the texture can be re-allocated when the 3D context has been lost or when
@@ -73,7 +86,6 @@ class Texture {
 	}
 
 	inline function set_startingMip(v:Int) {
-		if( flags.has(Loading) ) flags.set(AsyncKeepStartingMip);
 		return __startingMip = v;
 	}
 
@@ -90,8 +102,8 @@ class Texture {
 	}
 
 	function get_lodBias() : Float {
-		final fBits = 1 << (16 - 4);
-		var iPart = (packedLodBias >> (16 - 4)) - 15;
+		final fBits = 1 << (7 - 5);
+		var iPart = (packedLodBias >> 2) - 15;
 		var fPart = packedLodBias & (fBits - 1);
 		var v : Float = iPart + (fPart / fBits);
 		return v;
@@ -100,8 +112,9 @@ class Texture {
 	function set_lodBias(v:Float) {
 		v = hxd.Math.clamp(v, -15.0, 16.0) + 15.0;
 		var iPart = hxd.Math.floor(v);
-		var fPart = v % 1.0;
-		packedLodBias = iPart << (16 - 4) | hxd.Math.floor(fPart * (1 << (16 - 4)));
+		var fPart = hxd.Math.ufmod(v, 1.0);
+		final fBits = 1 << (7 - 5);
+		packedLodBias = iPart << 2 | hxd.Math.floor(fPart * (fBits - 1));
 		return v;
 	}
 
@@ -144,6 +157,7 @@ class Texture {
 		this.wrap = DEFAULT_WRAP;
 		this.lodBias = 0.0;
 		this.allocPos = hxd.impl.AllocPos.make();
+		this.slice = 0;
 		if( !this.flags.has(NoAlloc) && width > 0 ) alloc();
 	}
 
@@ -184,7 +198,7 @@ class Texture {
 		else
 		#end
 			h3d.pass.Copy.run(this, t);
-		lastFrame = old;
+		@:bypassAccessor lastFrame = old;
 		return t;
 	}
 
@@ -197,13 +211,11 @@ class Texture {
 	}
 
 	/**
-		In case we run out of GPU memory, textures that hasn't been used for a long time will be disposed.
-		This allows to set a per texture priority, so textures with lower priority will get disposed first.
-		You can also set a negative value to give priority for a texture to be disposed.
-		Textures with priority > 0 will also not be subject to regular textures cleanup.
+		Records that the texture is used by something visible during the current frame.
+		Streamed textures that are not visible lose mip levels when the streaming budget is exceeded (see hxd.res.TextureStream).
 	**/
-	public function setKeepPriority( priority : Int ) {
-		keepPriority = priority;
+	public inline function markVisible() {
+		visibleFrame = hxd.Timer.frameCount;
 	}
 
 	/**
@@ -244,6 +256,7 @@ class Texture {
 
 	public function resize(width, height) {
 		dispose();
+		residentMip = 0;
 
 		var tw = 1, th = 1;
 		while( tw < width ) tw <<= 1;
@@ -287,7 +300,7 @@ class Texture {
 	public function clear( color : Int, alpha = 1., layer = -1 ) {
 		alloc();
 		if( width == 0 || height == 0 ) return;
-		if( #if (usegl || hlsdl || js) true #else flags.has(Target) #end && (width != 1 || height != 1) ) {
+		if( #if ((usegl || hlsdl || js) && !dx12) true #else flags.has(Target) #end && (width != 1 || height != 1) ) {
 			var engine = h3d.Engine.getCurrent();
 			color |= Std.int(hxd.Math.clamp(alpha)*255) << 24;
 			if( layer < 0 ) {
@@ -335,7 +348,27 @@ class Texture {
 		}
 	}
 
+	public function setResidentMip( mip : Int ) {
+		if( mip == residentMip )
+			return true;
+		if( mip < 0 || mip >= mipLevels )
+			throw "Invalid resident mip " + mip + " (" + mipLevels + " mip levels)";
+		if( flags.has(Target) || flags.has(Writable) || flags.has(Is3D) || isDepth() )
+			throw "Resident mip is not supported for " + this;
+		if( format.match(S3TC(_)) && mip > 0 && ((width >> mip) & 3 != 0 || (height >> mip) & 3 != 0) )
+			throw "Resident mip " + mip + " of compressed texture " + this + " should be a 4x4 multiple";
+		if( !mem.driver.hasFeature(h3d.impl.Driver.Feature.ResidentMips) )
+			return false;
+		if( t == null ) {
+			residentMip = mip;
+			return true;
+		}
+		return mem.setResidentMip(this, mip);
+	}
+
 	function checkSize(width, height, mip) {
+		if( mip < residentMip )
+			throw "Mip level " + mip + " is not resident (residentMip = " + residentMip + ")";
 		var mw = this.width >> mip; if( mw == 0 ) mw = 1;
 		var mh = this.height >> mip; if( mh == 0 ) mh = 1;
 		if( width != mw || height != mh )
@@ -398,10 +431,11 @@ class Texture {
 		Beware, this is a very slow operation that shouldn't be done during rendering.
 	**/
 	public function capturePixels( face = 0, mipLevel = 0, ?region:h2d.col.IBounds ) : hxd.Pixels {
+		checkAlloc();
 		var old = lastFrame;
 		preventAutoDispose();
 		var pix = mem.driver.capturePixels(this, face, mipLevel, region);
-		lastFrame = old;
+		@:bypassAccessor lastFrame = old;
 		return pix;
 	}
 
@@ -489,6 +523,23 @@ class Texture {
 		return t;
 	}
 
+	static var cubeFaceMatrices = [
+		h3d.Matrix.L([0,0,-1,0, 0,-1,0,0, 1,0,0,0]),
+		h3d.Matrix.L([0,0,1,0, 0,-1,0,0, -1,0,0,0]),
+		h3d.Matrix.L([1,0,0,0, 0,0,1,0, 0,1,0,0]),
+		h3d.Matrix.L([1,0,0,0, 0,0,-1,0, 0,-1,0,0]),
+		h3d.Matrix.L([1,0,0,0, 0,-1,0,0, 0,0,1,0]),
+		h3d.Matrix.L([-1,0,0,0, 0,-1,0,0, 0,0,-1,0]),
+	];
+
+	/**
+		Returns the matrix transforming `vec3(uv * 2 - 1, 1)` into the direction of the given cube face.
+		The matrix is shared and must not be modified.
+	**/
+	public static function getCubeFaceMatrix( face : Int ) {
+		return cubeFaceMatrices[face];
+	}
+
 	/**
 		Returns a checker texture of size x size, than can be repeated
 	**/
@@ -529,25 +580,25 @@ class Texture {
 	}
 
 	static function allocNoise( t : h3d.mat.Texture, size : Int ) {
-		var b = new hxd.BitmapData(size, size);
+		var p = hxd.Pixels.alloc(size, size, RGBA);
 		for( x in 0...size )
 			for( y in 0...size ) {
 				var n = Std.random(256);
-				b.setPixel(x, y, 0xFF000000 | n | (n << 8) | (n << 16));
+				p.setPixel(x, y, 0xFF000000 | n | (n << 8) | (n << 16));
 			}
-		t.uploadBitmap(b);
-		b.dispose();
+		t.uploadPixels(p);
+		p.dispose();
 	}
 
 	static function allocChecker( t : h3d.mat.Texture, size : Int ) {
-		var b = new hxd.BitmapData(size, size);
-		b.clear(0xFFFFFFFF);
+		var p = hxd.Pixels.alloc(size, size, RGBA);
+		p.clear(0xFFFFFFFF);
 		for( x in 0...size>>1 )
 			for( y in 0...size>>1 ) {
-				b.setPixel(x, y, 0xFF000000);
-				b.setPixel(x+(size>>1), y+(size>>1), 0xFF000000);
+				p.setPixel(x, y, 0xFF000000);
+				p.setPixel(x+(size>>1), y+(size>>1), 0xFF000000);
 			}
-		t.uploadBitmap(b);
-		b.dispose();
+		t.uploadPixels(p);
+		p.dispose();
 	}
 }

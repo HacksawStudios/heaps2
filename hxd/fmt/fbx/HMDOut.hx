@@ -6,8 +6,8 @@ import hxd.BufferFormat;
 
 typedef CollideParams = {
 	?useDefault : Bool,
-	?precision : Float,
-	?maxSubdiv : Int,
+	?unit : Float,
+	?scale : Float,
 	?maxConvexHulls : Int,
 	?mesh : String,
 	?shapes : Array<ShapeColliderParams>
@@ -34,7 +34,6 @@ class HMDOut extends BaseLibrary {
 	var filePath : String;
 	var tmp = haxe.io.Bytes.alloc(4);
 	var midsSortRemap : Map<Int, Int>;
-	var lod0Mids : Array<Int>;
 	public var absoluteTexturePath : Bool;
 	public var optimizeSkin = true;
 	public var optimizeMesh = false;
@@ -44,10 +43,13 @@ class HMDOut extends BaseLibrary {
 	public var modelCollides : Map<String, Array<CollideParams>> = [];
 	public var ignoreCollides : Array<String>;
 	var ignoreCollidesCache : Map<Int,Bool> = [];
-	public var collisionThresholdHeight : Float;
-	public var collisionUseLowLod : Bool;
+	public var collisionThresholdHeight : Null<Float>;
+	public var collisionUseLowLod : Null<Bool>;
+	public var noCollision : Null<Bool>;
 	public var lowPrecConfig : Map<String,Precision>;
 	public var lodsDecimation : Array<Float>;
+	public var maxUVs : Int = 0;
+	public var noColor : Bool = false;
 
 	function int32tof( v : Int ) : Float {
 		tmp.set(0, v & 0xFF);
@@ -66,16 +68,6 @@ class HMDOut extends BaseLibrary {
 		return true;
 	}
 
-	#if (sys || nodejs)
-	function tmpFile(name : String) {
-		var tmp = Sys.getEnv("TMPDIR");
-		if( tmp == null ) tmp = Sys.getEnv("TMP");
-		if( tmp == null ) tmp = Sys.getEnv("TEMP");
-		if( tmp == null ) tmp = ".";
-		return tmp+"/"+name+Date.now().getTime()+"_"+Std.random(0x1000000)+".bin";
-	}
-	#end
-
 	function buildTangents( geom : hxd.fmt.fbx.Geometry ) {
 		var verts = geom.getVertices();
 		var normals = geom.getNormals();
@@ -85,55 +77,14 @@ class HMDOut extends BaseLibrary {
 		if ( index.vidx.length > 0 && uvs[0] == null ) @:privateAccess
 			throw "Need UVs to build tangents" + (geom.lib != null ? ' in ${geom.lib.fileName}' : '');
 
-		#if (hl && !hl_disable_mikkt)
-		var m = new hxd.tools.Mikktspace();
-		m.buffer = new hl.Bytes(8 * 4 * index.vidx.length);
-		m.stride = 8;
-		m.xPos = 0;
-		m.normalPos = 3;
-		m.uvPos = 6;
-
-		m.indexes = new hl.Bytes(4 * index.vidx.length);
-		m.indices = index.vidx.length;
-
-		m.tangents = new hl.Bytes(4 * 4 * index.vidx.length);
-		(m.tangents:hl.Bytes).fill(0,4 * 4 * index.vidx.length,0);
-		m.tangentStride = 4;
-		m.tangentPos = 0;
-
+		var count = index.vidx.length;
+		var buffer = haxe.io.Bytes.alloc(count * 8 * 4);
 		var out = 0;
-		for( i in 0...index.vidx.length ) {
-			var vidx = index.vidx[i];
-			m.buffer[out++] = verts[vidx*3];
-			m.buffer[out++] = verts[vidx*3+1];
-			m.buffer[out++] = verts[vidx*3+2];
-
-			m.buffer[out++] = normals[i*3];
-			m.buffer[out++] = normals[i*3+1];
-			m.buffer[out++] = normals[i*3+2];
-			var uidx = uvs[0].index[i];
-
-			m.buffer[out++] = uvs[0].values[uidx*2];
-			m.buffer[out++] = uvs[0].values[uidx*2+1];
-
-			m.tangents[i<<2] = 1;
-
-			m.indexes[i] = i;
+		inline function w(v:Float) {
+			buffer.setFloat(out, v);
+			out += 4;
 		}
-
-		m.compute();
-		return m.tangents;
-		#elseif (sys || nodejs)
-		var fileName = tmpFile("mikktspace_data");
-		var outFile = fileName+".out";
-		var outputData = new haxe.io.BytesBuffer();
-		outputData.addInt32(index.vidx.length);
-		outputData.addInt32(8);
-		outputData.addInt32(0);
-		outputData.addInt32(3);
-		outputData.addInt32(6);
-		for( i in 0...index.vidx.length ) {
-			inline function w(v:Float) outputData.addFloat(v);
+		for( i in 0...count ) {
 			var vidx = index.vidx[i];
 			w(verts[vidx*3]);
 			w(verts[vidx*3+1]);
@@ -147,27 +98,12 @@ class HMDOut extends BaseLibrary {
 			w(uvs[0].values[uidx*2]);
 			w(uvs[0].values[uidx*2+1]);
 		}
-		outputData.addInt32(index.vidx.length);
-		for( i in 0...index.vidx.length )
-			outputData.addInt32(i);
-		sys.io.File.saveBytes(fileName, outputData.getBytes());
-		var ret = try Sys.command("meshTools",["mikktspace",fileName,outFile]) catch( e : Dynamic ) -1;
-		if( ret != 0 ) {
-			sys.FileSystem.deleteFile(fileName);
-			throw "Failed to call 'mikktspace' executable required to generate tangent data. Please ensure it's in your PATH"+(filePath == null ? "" : ' ($filePath)');
-		}
-		var bytes = sys.io.File.getBytes(outFile);
-		var size = index.vidx.length*4;
+		var bytes = try hxd.tools.MeshTools.mikktspace(buffer, count, 8, 0, 3, 6) catch( e : String ) throw e + (filePath == null ? "" : ' ($filePath)');
+		var size = count * 4;
 		var arr = new hxd.FloatBuffer(size);
 		for( i in 0...size )
 			arr[i] = bytes.getFloat(i << 2);
-		sys.FileSystem.deleteFile(fileName);
-		sys.FileSystem.deleteFile(outFile);
 		return arr;
-		#else
-		throw "Tangent generation is not supported on this platform";
-		return ([] : Array<Float>);
-		#end
 	}
 
 	function updateNormals( g : Geometry, vbuf : hxd.FloatBuffer, idx : Array<Array<Int>> ) {
@@ -212,10 +148,8 @@ class HMDOut extends BaseLibrary {
 		}
 		var realIdx = new hxd.IndexBuffer();
 		for( idx in idx ) {
-			if ( idx == null ) {
-				trace("Empty list of vertex indexes");
+			if ( idx == null )
 				continue;
-			}
 			for( i in idx )
 				realIdx.push(pmap[i]);
 		}
@@ -282,84 +216,27 @@ class HMDOut extends BaseLibrary {
 	}
 
 	function optimize( vbuf : hxd.FloatBuffer, vertexFormat : hxd.BufferFormat, ibuf : Array<Int>, startIndex : Int, decimationFactor : Float ) {
-		var optimizedVbuf : hxd.FloatBuffer;
 		decimationFactor = hxd.Math.clamp(decimationFactor);
-
-		#if ( hl && hl_ver >= version("1.15.0") )
 		var vertexSize = vertexFormat.stride << 2;
 		var vertexCount = Std.int(vbuf.length / vertexFormat.stride);
-		var vertices = new hl.Bytes(vertexCount * vertexSize);
-		for ( i in 0...vbuf.length )
-			vertices.setF32(i << 2, cast(vbuf[i], Single));
+		var vertices = haxe.io.Bytes.alloc(vertexCount * vertexSize);
+		for( i in 0...vertexCount * vertexFormat.stride )
+			vertices.setFloat(i << 2, vbuf[i]);
 		var indexCount = ibuf.length;
-		var indices = new hl.Bytes(indexCount * 4);
-		for ( i => idx in ibuf )
-			indices.setI32(i << 2, idx);
-
-		var remap = new hl.Bytes(vertexCount * 4);
-		var uniqueVertexCount = hxd.tools.MeshOptimizer.generateVertexRemap(remap, indices, indexCount, vertices, vertexCount, vertexSize);
-		hxd.tools.MeshOptimizer.remapIndexBuffer(indices, indices, indexCount, remap);
-		hxd.tools.MeshOptimizer.remapVertexBuffer(vertices, vertices, vertexCount, vertexSize, remap);
-		vertexCount = uniqueVertexCount;
-		if ( decimationFactor > 0.0 ) {
-			var options = hxd.tools.MeshOptimizer.SimplifyOptions.LockBorder | hxd.tools.MeshOptimizer.SimplifyOptions.Prune;
-			indexCount = hxd.tools.MeshOptimizer.simplify(indices, indices, indexCount, vertices, vertexCount, vertexSize, Std.int(indexCount * (1.0 - decimationFactor)), decimationFactor, options, null);
-		}
-		hxd.tools.MeshOptimizer.optimizeVertexCache(indices, indices, indexCount, vertexCount);
-		hxd.tools.MeshOptimizer.optimizeOverdraw(indices, indices, indexCount, vertices, vertexCount, vertexSize, 1.05);
-		vertexCount = hxd.tools.MeshOptimizer.optimizeVertexFetch(vertices, indices, indexCount, vertices, vertexCount, vertexSize);
-
-		optimizedVbuf = new hxd.FloatBuffer();
-		optimizedVbuf.resize(vertexCount * vertexFormat.stride);
-		for ( i in 0...vertexCount * vertexFormat.stride )
-			optimizedVbuf[i] = vertices.getF32(i << 2);
-		ibuf.resize(indexCount);
-		for ( i in 0...indexCount )
-			ibuf[i] = indices.getI32(i << 2) + startIndex;
-
-		#elseif (sys || nodejs)
-		var fileName = tmpFile("meshTools_data");
-		var outFile = fileName+".out";
-
-		var vertexSize = vertexFormat.stride << 2;
-		var vertexCount = Std.int(vbuf.length / vertexFormat.stride);
-
-		var outputData = new haxe.io.BytesBuffer();
-		outputData.addInt32(vertexCount);
-		outputData.addInt32(vertexSize);
-		for( v in vbuf )
-			outputData.addFloat(v);
-		var indexCount = ibuf.length;
-		outputData.addInt32(indexCount);
-		for( i in ibuf )
-			outputData.addInt32(i);
-		sys.io.File.saveBytes(fileName, outputData.getBytes());
-		var ret = if (decimationFactor > 0.0)
-			try Sys.command("meshTools",["simplify",fileName,outFile,'${Std.int(indexCount * (1.0 - decimationFactor))}','${decimationFactor}']) catch( e : Dynamic ) -1;
-		else
-			try Sys.command("meshTools",["optimize",fileName,outFile]) catch( e : Dynamic ) -1;
-
-		if( ret != 0 ) {
-			sys.FileSystem.deleteFile(fileName);
-			throw "Failed to call 'meshTools' executable required to generate optimized mesh. Please ensure it's in your PATH"+(filePath == null ? "" : ' ($filePath)');
-		}
-		var input = sys.io.File.getBytes(outFile);
-		var pos = 1;
-		vertexCount = input.getInt32(0);
-		optimizedVbuf = new hxd.FloatBuffer();
-		optimizedVbuf.resize(vertexCount * vertexFormat.stride);
-		for ( i in 0...vertexCount * vertexFormat.stride )
-			optimizedVbuf[i] = input.getFloat(4 * pos++);
-		indexCount = input.getInt32(4 * pos++);
-		ibuf.resize(indexCount);
-		for ( i in 0...indexCount )
-			ibuf[i] = input.getInt32(4 * pos++) + startIndex;
-		sys.FileSystem.deleteFile(fileName);
-		sys.FileSystem.deleteFile(outFile);
-		#else
-		optimizedVbuf = vbuf;
-		#end
-
+		var indices = haxe.io.Bytes.alloc(indexCount << 2);
+		for( i => idx in ibuf )
+			indices.setInt32(i << 2, idx);
+		var targetIndexCount = decimationFactor > 0.0 ? Std.int(indexCount * (1.0 - decimationFactor)) : -1;
+		var r = try hxd.tools.MeshTools.optimize(vertices, vertexCount, vertexSize, indices, indexCount, targetIndexCount, decimationFactor) catch( e : String ) throw e + (filePath == null ? "" : ' ($filePath)');
+		if( r == null )
+			return vbuf;
+		var optimizedVbuf = new hxd.FloatBuffer();
+		optimizedVbuf.resize(r.vertexCount * vertexFormat.stride);
+		for( i in 0...r.vertexCount * vertexFormat.stride )
+			optimizedVbuf[i] = vertices.getFloat(i << 2);
+		ibuf.resize(r.indexCount);
+		for( i in 0...r.indexCount )
+			ibuf[i] = indices.getInt32(i << 2) + startIndex;
 		return optimizedVbuf;
 	}
 
@@ -369,7 +246,9 @@ class HMDOut extends BaseLibrary {
 		var verts = geom.getVertices();
 		var normals = geom.getNormals();
 		var uvs = geom.getUVs();
-		var colors = geom.getColors();
+		if( maxUVs > 0 && uvs.length > maxUVs )
+			uvs = uvs.slice(0, maxUVs);
+		var colors = noColor ? null : geom.getColors();
 		var mats = geom.getMaterials();
 		var index = geom.getPolygons();
 
@@ -879,7 +758,15 @@ class HMDOut extends BaseLibrary {
 		collider.vertexPosition = dataOut.length;
 		collider.vertexCount = vertexCount;
 		collider.indexCount = indexCount;
-		var mat = colliderModel.skin != null && colliderModel.skin.joints.length > 0 ? colliderModel.skin.joints[0].position.toMatrix() : colliderModel.position.toMatrix();
+		var mat : h3d.Matrix;
+		if (legacySkinImport) {
+			mat = colliderModel.skin != null && colliderModel.skin.joints.length > 0 ? colliderModel.skin.joints[0].position.toMatrix() : colliderModel.position.toMatrix();
+		}
+		else {
+			mat = colliderModel.position.toMatrix();
+			if (colliderModel.skin != null)
+				mat.multiply(mat, colliderModel.skin.joints[0].position.toMatrix());
+		}
 		var invTargetModelMat = targetModel.position.toMatrix().getInverse();
 		mat.multiply(mat, invTargetModelMat);
 		var tmpVec = new h3d.Vector();
@@ -918,6 +805,10 @@ class HMDOut extends BaseLibrary {
 			indexCount += idx == null ? 0 : idx.length;
 
 		var mat = colliderModel.position.toMatrix();
+		if (!legacySkinImport) {
+			if (colliderModel.skin != null)
+				mat.multiply(mat, colliderModel.skin.joints[0].position.toMatrix());
+		}
 		var invTargetModelMat = targetModel.position.toMatrix().getInverse();
 		mat.multiply(mat, invTargetModelMat);
 		var tmpVec = new h3d.Vector();
@@ -951,12 +842,12 @@ class HMDOut extends BaseLibrary {
 
 		// Compute convex hulls shapes with hmd data
 		var dim = bounds.dimension();
-		var prec = Math.min(dim, generateCollides.precision);
-		var subdiv = Math.ceil(dim / prec);
-		subdiv = Math.imin(subdiv, generateCollides.maxSubdiv);
-
-		var params = { maxConvexHulls: generateCollides.maxConvexHulls, maxResolution: subdiv * subdiv * subdiv };
+		if( generateCollides.unit == null || generateCollides.unit < 0 )
+			throw 'Invalid collide unit ${generateCollides.unit} for ${colliderModel.getObjectName()} in $fileName';
+		var resolution = Math.ceil(dim / generateCollides.unit);
+		var params = { maxConvexHulls: generateCollides.maxConvexHulls, resolution: resolution };
 		var convexHulls = hxd.fmt.hmd.Data.ConvexHullsCollider.buildConvexHulls(vertices, indexes, params);
+		convexHulls = [ for (idx in 0...convexHulls.length) hxd.fmt.hmd.Data.ConvexHullsCollider.scale(convexHulls[idx].vertices, convexHulls[idx].indexes, generateCollides.scale) ];
 
 		// Create convex hulls colliders
 		var collider = new ConvexHullsCollider();
@@ -1045,8 +936,9 @@ class HMDOut extends BaseLibrary {
 		var root = buildHierarchy().root;
 		var objects = [], joints = [], skins = [], foundSkin : Array<TmpObject> = null;
 		var uid = 0;
+
 		function indexRec( t : TmpObject ) {
-			if( t.isJoint ) {
+			if (t.isJoint) {
 				joints.push(t);
 			} else {
 				var isSkin = false;
@@ -1107,31 +999,55 @@ class HMDOut extends BaseLibrary {
 			if( models.length == 0 ) continue;
 			if( models.length > 1 ) throw "Single skin applied to multiple models not supported";
 			var m = models[0];
-			for( o2 in objects )
+			for( o2 in objects ) {
 				if( o2.model == m ) {
-					foundSkin.push(o);
-					o2.skin = o;
-					if( o.model == null ) o.model = m;
-					ignoreMissingObject(m.getId()); // make sure we don't store animation for the model (only skin object has one)
-					// copy parent
-					var p = o.parent;
-					if( p != o2 ) {
-						o2.parent.childs.remove(o2);
-						o2.parent = p;
-						if( p != null ) p.childs.push(o2) else root = o2;
-					}
-					// remove skin from hierarchy
-					if( p != null ) p.childs.remove(o);
-					// move not joint to new parent
-					// (only first level, others will follow their respective joint)
-					for( c in o.childs.copy() )
-						if( !c.isJoint ) {
-							o.childs.remove(c);
-							o2.childs.push(c);
-							c.parent = o2;
+					if (legacySkinImport) {
+						foundSkin.push(o);
+						o2.skin = o;
+						if( o.model == null ) o.model = m;
+						ignoreMissingObject(m.getId()); // make sure we don't store animation for the model (only skin object has one)
+						// copy parent
+						var p = o.parent;
+						if( p != o2 ) {
+							o2.parent.childs.remove(o2);
+							o2.parent = p;
+							if( p != null ) p.childs.push(o2) else root = o2;
 						}
+						// remove skin from hierarchy
+						if( p != null ) p.childs.remove(o);
+						// move not joint to new parent
+						// (only first level, others will follow their respective joint)
+						for( c in o.childs.copy() ) {
+							if( !c.isJoint ) {
+								o.childs.remove(c);
+								o2.childs.push(c);
+								c.parent = o2;
+							}
+						}
+					}
+					else {
+						for (c in o.childs) {
+							if (c.isJoint) {
+								if (o2.rootJoints == null)
+									o2.rootJoints = [];
+								o2.rootJoints.push(c);
+
+								if (c.model.name.toLowerCase().indexOf("root") < 0)
+									continue;
+
+								var jDef = getDefaultMatrixes(c.model);
+								var modelDef = getDefaultMatrixes(m);
+
+								var newDef = new DefaultMatrixes();
+								newDef.fromMatrix(modelDef.toMatrix(false).multiplied(jDef.toMatrix(false).getInverse()));
+								defaultModelMatrixes.set(m.getId(), newDef);
+							}
+						}
+					}
+
 					break;
 				}
+			}
 		}
 
 		// we need to have ignored skins objects anims first
@@ -1176,18 +1092,24 @@ class HMDOut extends BaseLibrary {
 		var hgeomCol = new Map();
 		var hmat = new Map<Int,Int>();
 		var hlods = new Map<String, Array<Index<Model>>>();
+		var lods0Mids : Map<String, Array<Int>> = new Map();
 		var index = 0;
 		for( o in objects ) {
 
 			o.index = index++;
 
 			var model = new Model();
-			var ref = o.skin == null ? o : o.skin;
-
 			model.name = o.model == null ? null : o.model.getName();
 			model.parent = o.parent == null || o.parent.isJoint ? -1 : o.parent.index;
 			model.follow = o.parent != null && o.parent.isJoint ? o.parent.model.getName() : null;
-			var m = ref.model == null ? new hxd.fmt.fbx.BaseLibrary.DefaultMatrixes() : getDefaultMatrixes(ref.model);
+			var m : DefaultMatrixes;
+			if (legacySkinImport) {
+				var ref = o.skin == null ? o : o.skin;
+				m = ref.model == null ? new hxd.fmt.fbx.BaseLibrary.DefaultMatrixes() : getDefaultMatrixes(ref.model);
+			}
+			else {
+				m = o.model == null ? new hxd.fmt.fbx.BaseLibrary.DefaultMatrixes() : getDefaultMatrixes(o.model);
+			}
 			var p = new Position();
 			p.x = m.trans == null ? 0 : -m.trans.x;
 			p.y = m.trans == null ? 0 : m.trans.y;
@@ -1296,27 +1218,48 @@ class HMDOut extends BaseLibrary {
 			var g = getChild(o.model, "Geometry");
 
 			var skin = null;
-			if( o.skin != null ) {
-				var rootJoints = [];
-				for( c in o.skin.childs )
-					if( c.isJoint )
-						rootJoints.push(c.joint);
-				skin = createSkin(hskins, tmpGeom, rootJoints);
-				if( skin.boundJoints.length > maxBonesPerSkin ) {
-					var g = new hxd.fmt.fbx.Geometry(this, g);
-					var idx = g.getIndexes();
-					skin.split(maxBonesPerSkin, [for( i in idx.idx ) idx.vidx[i]], mids.length > 1 ? g.getMaterialByTriangle() : null);
+			if (legacySkinImport) {
+				if( o.skin != null ) {
+					var rootJoints = [];
+					for( c in o.skin.childs )
+						if( c.isJoint )
+							rootJoints.push(c.joint);
+					skin = createSkin(hskins, tmpGeom, rootJoints);
+					if( skin.boundJoints.length > maxBonesPerSkin ) {
+						var g = new hxd.fmt.fbx.Geometry(this, g);
+						var idx = g.getIndexes();
+						skin.split(maxBonesPerSkin, [for( i in idx.idx ) idx.vidx[i]], mids.length > 1 ? g.getMaterialByTriangle() : null);
+					}
+					model.skin = makeSkin(skin);
 				}
-				model.skin = makeSkin(skin, o.skin);
+			}
+			else {
+				if( o.rootJoints != null ) {
+					skin = createSkin(hskins, tmpGeom, [for (j in o.rootJoints) j.joint]);
+					if( skin.boundJoints.length > maxBonesPerSkin ) {
+						var g = new hxd.fmt.fbx.Geometry(this, g);
+						var idx = g.getIndexes();
+						skin.split(maxBonesPerSkin, [for( i in idx.idx ) idx.vidx[i]], mids.length > 1 ? g.getMaterialByTriangle() : null);
+					}
+					model.skin = makeSkin(skin);
+				}
 			}
 
-			// Reorder materials to ensure there are in the same order for lods
+			// For each LOD > 0, reorder its materials in the same order that the LOD 0
 			var lodsInfos = getLODInfos(model.name);
+			if (lodsInfos.lodLevel == 0)
+				lods0Mids.set(lodsInfos.modelName, mids);
 			if (lodsInfos.lodLevel != -1) {
 				midsSortRemap = new Map<Int, Int>();
 				for (idx in 0...mids.length) {
-					midsSortRemap.set(idx, mids[idx]);
-					mids[idx] = idx;
+					var lod0Mids = lods0Mids.get(lodsInfos.modelName);
+					for (idx2 in 0...lod0Mids.length) {
+						if (mids[idx] == lod0Mids[idx2]) {
+							mids[idx] = lod0Mids[idx2];
+							midsSortRemap.set(idx, idx2);
+							break;
+						}
+					}
 				}
 			}
 
@@ -1348,13 +1291,13 @@ class HMDOut extends BaseLibrary {
 			}
 			if( gdata.materials == null )
 				model.materials = mids;
-			else if (lodsInfos.lodLevel > 0)
+			else if (lodsInfos.lodLevel > 0) {
+				var lod0Mids = lods0Mids.get(lodsInfos.modelName);
 				model.materials = [for( id in gdata.materials ) lod0Mids[id]];
+			}
 			else
 				model.materials = [for( id in gdata.materials ) mids[id]];
 
-			if (lodsInfos.lodLevel == 0)
-				lod0Mids = mids;
 			var lodsInfos = getLODInfos(model.name);
 			var lodIndex = lodsInfos.lodLevel;
 			var key = lodsInfos.modelName;
@@ -1406,6 +1349,54 @@ class HMDOut extends BaseLibrary {
 			}
 		}
 
+		// Verify that all the LODs have the same vertex format
+		for (m in d.models) {
+			if (m.lods == null || m.geometry < 0)
+				continue;
+			var format = d.geometries[m.geometry].vertexFormat;
+			for (lodIndex in m.lods) {
+				var lod = d.models[lodIndex];
+				var lodFormat = d.geometries[lod.geometry].vertexFormat;
+				if (lodFormat != format) {
+					function inputs(f : hxd.BufferFormat) return [for (i in f.getInputs()) i.name].join(", ");
+					throw '${lod.name} has a different vertex format than ${m.name} : ${inputs(lodFormat)} instead of ${inputs(format)}';
+				}
+			}
+		}
+
+		var rootIndex = -1;
+		for (i => m in d.models) {
+			if (m.parent == -1 && m.geometry == -1 && m.name == null && m.position.isIdentity()) {
+				rootIndex = i;
+				break;
+			}
+		}
+		if (rootIndex != -1) {
+			var objectCount = 0;
+			for (m in d.models) {
+				if (!m.isLOD() && !m.isCollider() && m.parent == rootIndex)
+					objectCount++;
+				if (objectCount > 1)
+					break;
+			}
+			if (objectCount == 1) {
+				d.models.remove(d.models[rootIndex]);
+				for (m in d.models) {
+					if (m.parent == rootIndex)
+						m.parent = -1;
+					else if (m.parent > rootIndex)
+						m.parent--;
+					if (m.lods != null) {
+						for (i in 0...m.lods.length) {
+							var lodIndex = m.lods[i];
+							if (lodIndex > rootIndex)
+								m.lods[i] = lodIndex - 1;
+						}
+					}
+				}
+			}
+		}
+
 		// Make colliders
 		d.colliders = [];
 		for( model in d.models ) {
@@ -1440,7 +1431,7 @@ class HMDOut extends BaseLibrary {
 			for ( idx => mc in mcs ) {
 				var isDefaultParams = mc != null && mc.useDefault;
 				var params = isDefaultParams ? generateCollides : mc;
-				var colliderType = hxd.fmt.hmd.Data.Collider.resolveColliderType(d, model, params, isDefaultParams, collisionThresholdHeight, collisionUseLowLod);
+				var colliderType = hxd.fmt.hmd.Data.Collider.resolveColliderType(d, model, params, isDefaultParams, collisionThresholdHeight, collisionUseLowLod, noCollision);
 				var collider : Collider = switch (colliderType) {
 					case Empty:
 						new EmptyCollider();
@@ -1503,9 +1494,9 @@ class HMDOut extends BaseLibrary {
 		return path;
 	}
 
-	function makeSkin( skin : h3d.anim.Skin, obj : TmpObject ) {
+	function makeSkin( skin : h3d.anim.Skin ) {
 		var s = new Skin();
-		s.name = obj.model.getName();
+		s.name = "Skin";
 		s.joints = [];
 		for( jo in skin.allJoints ) {
 			var j = new SkinJoint();

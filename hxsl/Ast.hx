@@ -36,6 +36,8 @@ enum Type {
 	TBuffer( t : Type, size : SizeDecl, kind : BufferKind );
 	TChannel( size : Int );
 	TTextureHandle;
+	TBufferHandle;
+	TEnum( path : String );
 }
 
 enum VecType {
@@ -105,6 +107,7 @@ enum VarQualifier {
 	Final;
 	Flat;
 	NoVar;
+	Enum( path : String, constructors : Array<String> );
 }
 
 enum Prec {
@@ -318,6 +321,9 @@ enum TGlobal {
 	FragCoord;
 	FragDepth;
 	FrontFacing;
+	// dx12 barycentrics
+	Barycentrics;
+	VertexAt;
 	// bit casting
 	FloatBitsToInt;
 	FloatBitsToUint;
@@ -340,6 +346,13 @@ enum TGlobal {
 	Transpose;
 	TexelLod;
 	ResolveSampler;
+	ResolveBuffer;
+	FindLSB;
+	FindMSB;
+	AtomicAnd;
+	AtomicOr;
+	BitCount;
+	ToUInt;
 }
 
 enum SyntaxArgAccess {
@@ -443,10 +456,21 @@ class Tools {
 		return null;
 	}
 
+	public static function getEnum( v : TVar ) {
+		if( v.qualifiers == null )
+			return null;
+		for( q in v.qualifiers )
+			switch( q ) {
+			case Enum(path, constructors): return { path : path, constructors : constructors };
+			default:
+			}
+		return null;
+	}
+
 	public static function getConstBits( v : TVar ) {
 		switch( v.type ) {
 		case TBool:
-			return 1;
+			if( isConst(v) ) return 1;
 		case TInt:
 			for( q in v.qualifiers )
 				switch( q ) {
@@ -479,6 +503,14 @@ class Tools {
 				default:
 				}
 		return false;
+	}
+
+	public static function isFinalConst( v : TVar ) {
+		return v.kind.match(Local) && v.type.match(TInt | TFloat | TBool) && hasQualifier(v, Final);
+	}
+
+	public static function isFinalInt( v : TVar ) {
+		return isFinalConst(v) && v.type.match(TInt);
 	}
 
 	public static function isStruct( v : TVar ) {
@@ -521,10 +553,10 @@ class Tools {
 		case TVec(size, t):
 			var prefix = switch( t ) {
 			case VFloat: "";
-			case VInt: "i";
-			case VBool: "b";
+			case VInt: "I";
+			case VBool: "B";
 			}
-			prefix + "vec" + size;
+			prefix + "Vec" + size;
 		case TStruct(vl):"{" + [for( v in vl ) v.name + " : " + toString(v.type)].join(",") + "}";
 		case TArray(t, s): toString(t) + "[" + (switch( s ) { case SConst(i): "" + i; case SVar(v): v.name; } ) + "]";
 		case TBuffer(t, s, k):
@@ -538,6 +570,7 @@ class Tools {
 			};
 			prefix+" "+toString(t) + "[" + (switch( s ) { case SConst(i): "" + i; case SVar(v): v.name; } ) + "]";
 		case TBytes(n): "Bytes" + n;
+		case TEnum(path): path;
 		case TSampler(dim, arr):
 			"Sampler"+dim.getName().substr(1)+(arr ? "Array":"");
 		case TRWTexture(dim, arr,dims):
@@ -585,7 +618,7 @@ class Tools {
 			return true;
 		case TCall(e, pl):
 			switch( e.e ) {
-			case TGlobal( ImageStore | AtomicAdd | GroupMemoryBarrier | ResolveSampler ):
+			case TGlobal( ImageStore | AtomicAdd | AtomicAnd | AtomicOr | GroupMemoryBarrier | ResolveSampler | ResolveBuffer ):
 				return true;
 			case TGlobal(g):
 			default:
@@ -670,7 +703,7 @@ class Tools {
 	public static function size( t : Type ) {
 		return switch( t ) {
 		case TVoid: 0;
-		case TFloat, TInt: 1;
+		case TFloat, TInt, TEnum(_): 1;
 		case TVec(n, _), TChannel(n): n;
 		case TStruct(vl):
 			var s = 0;
@@ -681,10 +714,12 @@ class Tools {
 		case TMat4: 16;
 		case TMat3x4: 12;
 		case TBytes(s): s;
-		case TBool, TString, TSampler(_), TRWTexture(_), TFun(_): 0;
+		case TBool: 1;
+		case TString, TSampler(_), TRWTexture(_), TFun(_): 0;
 		case TArray(t, SConst(v)), TBuffer(t, SConst(v),_): size(t) * v;
 		case TArray(_, SVar(_)), TBuffer(_): 0;
 		case TTextureHandle: 2;
+		case TBufferHandle: 1;
 		}
 	}
 

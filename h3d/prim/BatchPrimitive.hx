@@ -1,11 +1,57 @@
 package h3d.prim;
 
+class BytesArray {
+	public var bytes(default, null) : Array<haxe.io.Bytes>;
+	public var pos(default, null) : Array<Int>;
+	public var totalSize(default, null) : Int;
+	var maxSize : Int;
+
+	public function new(bSize: Int, maxSize : Int) {
+		if ( bSize > maxSize && maxSize > 0 )
+			throw "assert";
+		this.maxSize = maxSize;
+		bytes = [haxe.io.Bytes.alloc(bSize)];
+		pos = [0];
+	}
+
+	public function alloc(bSize : Int) : { b : haxe.io.Bytes, pos : Int } {
+		if ( bSize > maxSize && maxSize > 0 )
+			throw "assert";
+		totalSize += bSize;
+		var bIdx = bytes.length - 1;
+		var b = bytes[bIdx];
+		var bStart = pos[bIdx];
+		var bNeeded = bStart + bSize;
+		if ( bNeeded > b.length ) {
+			var size = b.length * 2;
+			if ( maxSize > 0 && size > maxSize )
+				size = maxSize;
+			if ( size < bSize )
+				size = bSize;
+			b = bytes[++bIdx] = haxe.io.Bytes.alloc(size);
+			bNeeded = bSize;
+			bStart = 0;
+		}
+		pos[bIdx] = bNeeded;
+		return { b : b, pos : bStart };
+	}
+
+	public function upload( buffer : h3d.Buffer, vStart : Int = 0 ) {
+		for ( i => b in bytes ) {
+			var vCount = Std.int(pos[i] / buffer.format.strideBytes);
+			buffer.uploadBytes(b, 0, vCount, vStart);
+			vStart += vCount;
+		}
+	}
+}
+
 class SubMesh {
 	public var subParts : Array<SubPart>;
 	public var subPartStart : Int;
 	public var bounds : h3d.col.Bounds;
 	public var lodCount : Int;
 	public var lodConfig : Array<Float>;
+	public var cullingScreenRatio : Float;
 	public function new() {
 	}
 }
@@ -19,18 +65,19 @@ class SubPart {
 
 @:access(h3d.prim.HMDModel)
 class BatchPrimitive extends MeshPrimitive {
-	static var SUBMESH_INFOS_FMT = hxd.BufferFormat.make([{ name : "lodStart", type : DFloat }, { name : "lodCount", type : DFloat },{ name : "boudingSphere", type : DFloat }]);
+	static var SUBMESH_INFOS_FMT = hxd.BufferFormat.make([{ name : "centerLodStart", type : DVec4 }, { name : "halfExtentsLodCount", type : DVec4 }]);
 	static var SUBPART_INFOS_FMT = hxd.BufferFormat.make([{ name : "indexCount", type : DFloat }, { name : "indexStart", type : DFloat }]);
 	static var LOD_INFOS_FMT = hxd.BufferFormat.make([{ name : "screenRatio", type : DFloat }]);
 
 	public var vertexFormat(default, null) : hxd.BufferFormat;
 	public var subMeshes(default, null) : Array<SubMesh> = [];
-	var models(default, null) : Array<h3d.prim.HMDModel> = [];
+	var models(default, null) : Array<MeshPrimitive> = [];
 	var bounds = new h3d.col.Bounds();
-	var vbuf : haxe.io.Bytes;
-	var vByteStart : Int = 0;
-	var ibuf : haxe.io.Bytes;
-	var iByteStart : Int = 0;
+	var isDynamic : Bool = true;
+
+	var vBytes : BytesArray;
+	var iBytes : BytesArray;
+	var maxByteSize = -1;
 
 	var subMeshCount : Int = 0;
 	public var cpuSubMeshInfos : haxe.io.Bytes;
@@ -42,24 +89,24 @@ class BatchPrimitive extends MeshPrimitive {
 	public var cpuLodInfos : hxd.FloatBuffer;
 	public var gpuLodInfos : h3d.Buffer;
 
+	public var hasLogicNormal : Bool = false;
 	var logicNormals : hxd.FloatBuffer;
-	public var hasLogicNormal(get, never) : Bool;
-	function get_hasLogicNormal() return logicNormals != null;
 
-	public function new(format) {
+	public function new(format, isDynamic = true, maxByteSize = -1) {
 		vertexFormat = format;
-
-		vbuf = haxe.io.Bytes.alloc(0);
-		ibuf = haxe.io.Bytes.alloc(0);
+		this.maxByteSize = maxByteSize;
+		this.isDynamic = isDynamic;
 	}
 
-	public function addModel( model : h3d.prim.HMDModel ) : Int {
-		if ( model.data.vertexFormat != vertexFormat )
-			throw "assert";
+	public function addModel( model : MeshPrimitive ) : Int {
 		var subMeshID = models.indexOf(model);
 		if ( subMeshID >= 0 )
 			return subMeshID;
-		dispose();
+		if ( buffer != null ) {
+			dispose();
+			if ( !isDynamic )
+				rebuildModels();
+		}
 		subMeshID = models.length;
 		models.push(model);
 		fillModel(model);
@@ -69,22 +116,102 @@ class BatchPrimitive extends MeshPrimitive {
 	public function addLogicNormal() {
 		if ( hasLogicNormal )
 			return;
-		logicNormals = new hxd.FloatBuffer();
-		for ( m in models )
-			fillLogicNormal(m);
-		addBuffer(h3d.Buffer.ofFloats(logicNormals, hxd.BufferFormat.make([{ name : "logicNormal", type : DVec3 }])));
+		hasLogicNormal = true;
+		if ( buffer != null ) {
+			logicNormals = new hxd.FloatBuffer();
+			for ( m in models )
+				fillLogicNormal(m);
+			addBuffer(h3d.Buffer.ofFloats(logicNormals, hxd.BufferFormat.make([{ name : "logicNormal", type : DVec3 }])));
+			if ( !isDynamic )
+				logicNormals = null;
+		}
 	}
 
-	public function getSubMeshID( model : h3d.prim.HMDModel ) {
+	public function getSubMeshID( model : MeshPrimitive ) {
 		return models.indexOf(model);
 	}
 
-	function fillModel( model : h3d.prim.HMDModel ) {
+	function rebuildModels() {
+		subMeshes = [];
+		bounds.empty();
+		subMeshCount = subPartCount = totalLodCount = 0;
+		for ( m in models )
+			fillModel(m);
+	}
+
+	function fillPolygon( model : Polygon ) {
+		var levels = [model];
+		var lodConfig = [];  // ratio of the next level
+		var lods = model.lods;
+		if( lods != null ) {
+			for ( l in lods ) {
+				levels.push(l.prim);
+				lodConfig.push(l.screenRatio);
+			}
+		}
+		lodConfig.push(0.0);
 		var subMesh = new SubMesh();
 		subMesh.bounds = model.getBounds();
 		bounds.add(subMesh.bounds);
-		var lodCount = subMesh.lodCount = model.lods.length;
+		subMesh.lodCount = levels.length;
+		subMesh.lodConfig = lodConfig;
+		subMesh.subPartStart = subPartCount;
+
+		var subPart = new SubPart();
+		subPart.indexStarts = [];
+		subPart.indexCounts = [];
+		for ( model in levels ) {
+			var cpuBuf = model.getCPUBuffer();
+			#if hl
+			var vertices = @:privateAccess new haxe.io.Bytes(hl.Bytes.getArray(cpuBuf.getNative()), cpuBuf.length * 4);
+			#else
+			var vertices = haxe.io.Bytes.alloc(cpuBuf.length * 4);
+			for ( i in 0...cpuBuf.length )
+				vertices.setFloat(i<<2, cpuBuf[i]);
+			#end
+
+			var vByteSize = model.vertexCount() * vertexFormat.strideBytes;
+			if ( vBytes == null )
+				vBytes = new BytesArray(vByteSize, maxByteSize);
+			var vStart = Std.int(vBytes.totalSize / vertexFormat.strideBytes);
+			var vAlloc = vBytes.alloc(vByteSize);
+			var vbuf = vAlloc.b;
+			var vByteStart = vAlloc.pos;
+			vbuf.blit(vByteStart, vertices, 0, vByteSize);
+
+			var triIndices = model.idx == null;
+			var iCount = triIndices ? model.triCount() * 3 : model.idx.length;
+			var iByteSize = iCount * 4;
+			if ( iBytes == null )
+				iBytes = new BytesArray(iByteSize, maxByteSize);
+			var iStart = iBytes.totalSize >> 2;
+			var iAlloc = iBytes.alloc(iByteSize);
+			var ibuf = iAlloc.b;
+			var iByteStart = iAlloc.pos;
+
+			if ( triIndices ) {
+				for ( i in 0...iCount )
+					ibuf.setInt32(iByteStart + (i << 2), i + vStart);
+			} else {
+				for ( i in 0...iCount )
+					ibuf.setInt32(iByteStart + (i << 2), model.idx[i] + vStart);
+			}
+			subPart.indexStarts.push(iStart);
+			subPart.indexCounts.push(iCount);
+		}
+
+		subMesh.subParts = [subPart];
+		subMeshes.push( subMesh );
+		fillSubMeshInfos( subMesh );
+	}
+
+	function fillHMD( model : HMDModel) {
+		var subMesh = new SubMesh();
+		subMesh.bounds = model.getBounds();
+		bounds.add(subMesh.bounds);
+		subMesh.lodCount = model.lods.length;
 		subMesh.lodConfig = model.lodConfig;
+		subMesh.cullingScreenRatio = model.cullingScreenRatio;
 		subMesh.subParts = [];
 		subMesh.subPartStart = subPartCount;
 		var dataPosition = model.dataPosition;
@@ -95,44 +222,38 @@ class BatchPrimitive extends MeshPrimitive {
 
 		for ( lod in model.lods ) {
 			var vByteSize = lod.vertexCount * vertexFormat.strideBytes;
-			var vByteNeeded = vByteStart + vByteSize;
-			if ( vByteNeeded > vbuf.length ) {
-				var oldVbuf = vbuf;
-				vbuf = haxe.io.Bytes.alloc( (vByteNeeded >> 1) * 3 );
-				vbuf.blit(0, oldVbuf, 0, vByteStart);
-			}
+			if ( vBytes == null )
+				vBytes = new BytesArray(vByteSize, maxByteSize);
+			var vStart = Std.int(vBytes.totalSize / vertexFormat.strideBytes);
+			var vAlloc = vBytes.alloc(vByteSize);
+			var vbuf = vAlloc.b;
+			var vByteStart = vAlloc.pos;
 			var vertices = entry.fetchBytes(dataPosition + lod.vertexPosition, vByteSize);
 			vbuf.blit(vByteStart, vertices, 0, vByteSize);
 
 			var iCount = lod.indexCount;
 			var iByteSize = iCount * 4;
-			var iByteNeeded = iByteStart + iByteSize;
-			if ( iByteNeeded > ibuf.length ) {
-				var oldIbuf = ibuf;
-				ibuf = haxe.io.Bytes.alloc( (iByteNeeded >> 1) * 3 );
-				ibuf.blit(0, oldIbuf, 0, iByteStart);
-			}
+			if ( iBytes == null )
+				iBytes = new BytesArray(iByteSize, maxByteSize);
 
-			var lodIs32 = lod.vertexCount > 0x10000;
-			var iLodByteSize = (lodIs32 ? 4 : 2) * iCount;
-			var inIndices = entry.fetchBytes(dataPosition + lod.indexPosition, iLodByteSize);
-			var outIndices : haxe.io.Bytes = !lodIs32 ? haxe.io.Bytes.alloc( iCount * 4 ) : inIndices;
-			var vStart = Std.int(vByteStart / vertexFormat.strideBytes);
-			for ( i in 0...iCount )
-				if ( lodIs32 )
-					outIndices.setInt32(i << 2, inIndices.getInt32(i << 2) + vStart);
-				else
-					outIndices.setInt32(i << 2, inIndices.getUInt16(i << 1) + vStart);
-			ibuf.blit(iByteStart, outIndices, 0, iByteSize);
-
-			var iStart = iByteStart >> 2;
+			var iStart = iBytes.totalSize >> 2;
 			for ( count in lod.indexCounts ) {
 				indexStarts.push(iStart);
 				iStart += count;
 			}
 
-			vByteStart = vByteNeeded;
-			iByteStart = iByteNeeded;
+			var iAlloc = iBytes.alloc(iByteSize);
+			var ibuf = iAlloc.b;
+			var iByteStart = iAlloc.pos;
+
+			var lodIs32 = lod.vertexCount > 0x10000;
+			var iLodByteSize = (lodIs32 ? 4 : 2) * iCount;
+			var indices = entry.fetchBytes(dataPosition + lod.indexPosition, iLodByteSize);
+			for ( i in 0...iCount )
+				if ( lodIs32 )
+					ibuf.setInt32(iByteStart + (i << 2), indices.getInt32(i << 2) + vStart);
+				else
+					ibuf.setInt32(iByteStart + (i << 2), indices.getUInt16(i << 1) + vStart);
 		}
 
 		for ( matIdx in 0...matCount ) {
@@ -148,6 +269,14 @@ class BatchPrimitive extends MeshPrimitive {
 
 		subMeshes.push( subMesh );
 		fillSubMeshInfos( subMesh );
+	}
+
+	function fillModel( model : MeshPrimitive ) {
+		var hmd = Std.downcast(model, HMDModel);
+		if (hmd != null )
+			fillHMD(hmd);
+		else
+			fillPolygon(cast model);
 	}
 
 	function fillSubMeshInfos( subMesh : SubMesh ) {
@@ -166,9 +295,16 @@ class BatchPrimitive extends MeshPrimitive {
 
 		var subMeshStart = subMeshID * SUBMESH_INFOS_FMT.strideBytes;
 		var lodStart = totalLodCount * LOD_INFOS_FMT.stride;
-		cpuSubMeshInfos.setInt32(subMeshStart + 0, lodStart);
-		cpuSubMeshInfos.setInt32(subMeshStart + 4, lodCount);
-		cpuSubMeshInfos.setFloat(subMeshStart + 8, subMesh.bounds.getBoundingRadius());
+		var bounds = subMesh.bounds;
+		var halfExtentScale = bounds.isEmpty() ? 0.0 : 0.5;
+		cpuSubMeshInfos.setFloat(subMeshStart + 0, (bounds.xMin + bounds.xMax) * 0.5);
+		cpuSubMeshInfos.setFloat(subMeshStart + 4, (bounds.yMin + bounds.yMax) * 0.5);
+		cpuSubMeshInfos.setFloat(subMeshStart + 8, (bounds.zMin + bounds.zMax) * 0.5);
+		cpuSubMeshInfos.setInt32(subMeshStart + 12, lodStart);
+		cpuSubMeshInfos.setFloat(subMeshStart + 16, (bounds.xMax - bounds.xMin) * halfExtentScale);
+		cpuSubMeshInfos.setFloat(subMeshStart + 20, (bounds.yMax - bounds.yMin) * halfExtentScale);
+		cpuSubMeshInfos.setFloat(subMeshStart + 24, (bounds.zMax - bounds.zMin) * halfExtentScale);
+		cpuSubMeshInfos.setInt32(subMeshStart + 28, lodCount);
 
 		totalLodCount += lodCount;
 		var lodNeeded = totalLodCount * LOD_INFOS_FMT.stride;
@@ -177,11 +313,9 @@ class BatchPrimitive extends MeshPrimitive {
 		if( cpuLodInfos.length < lodNeeded )
 			cpuLodInfos.grow( hxd.Math.imax((cpuLodInfos.length >> 1) * 3, lodNeeded) );
 
-		var lodConfigHasCulling = lodConfig.length > lodCount - 1;
-		var minScreenRatioCulling = lodConfigHasCulling ? lodConfig[lodConfig.length - 1] : 0.0;
 		for ( lodIndex in 0...lodCount )
 			cpuLodInfos[lodStart + lodIndex] = lodIndex < lodConfig.length ? lodConfig[lodIndex] : 0.0;
-		cpuLodInfos[totalLodCount - 1] = minScreenRatioCulling;
+		cpuLodInfos[totalLodCount - 1] = subMesh.cullingScreenRatio;
 
 		var subParts = subMesh.subParts;
 		var subPartNeeded = (subPartCount + subParts.length * lodCount) * SUBPART_INFOS_FMT.strideBytes;
@@ -204,7 +338,33 @@ class BatchPrimitive extends MeshPrimitive {
 		subPartCount += subParts.length * lodCount;
 	}
 
-	function fillLogicNormal( model : h3d.prim.HMDModel ) @:privateAccess {
+	function fillLogicNormal( model : MeshPrimitive ) @:privateAccess {
+		var poly = Std.downcast(model, Polygon);
+		if ( poly != null ) {
+			var levels = [poly];
+			var lods = poly.lods;
+			if( lods != null )
+				for ( l in lods ) levels.push(l.prim);
+			for ( poly in levels ) {
+				var startOffset : Int = logicNormals.length;
+				var vCount = poly.vertexCount();
+				logicNormals.grow(vCount*3);
+				var k = 0;
+				var hasNormal = poly.normals == null;
+				if ( !hasNormal )
+					poly.addNormals();
+				for( n in poly.normals ) {
+					logicNormals[startOffset + k++] = n.x;
+					logicNormals[startOffset + k++] = n.y;
+					logicNormals[startOffset + k++] = n.z;
+				}
+				if ( !hasNormal )
+					poly.normals = null;
+			}
+			return;
+		}
+
+		var model : HMDModel = cast model;
 		var lods = model.lods;
 		for ( lod in lods ) {
 			var pos = model.lib.getBuffers(lod, hxd.BufferFormat.POS3D);
@@ -268,13 +428,13 @@ class BatchPrimitive extends MeshPrimitive {
 	override public function alloc( engine : h3d.Engine ) {
 		dispose();
 
-		var vCount = Std.int(vByteStart / vertexFormat.strideBytes);
+		var vCount = Std.int(vBytes.totalSize / vertexFormat.strideBytes);
 		buffer = new h3d.Buffer(vCount, vertexFormat);
-		buffer.uploadBytes(vbuf, 0, vCount);
+		vBytes.upload(buffer);
 
-		var iCount = iByteStart >> 2;
+		var iCount = iBytes.totalSize >> 2;
 		indexes = new h3d.Indexes(iCount, true);
-		indexes.uploadBytes(ibuf, 0, iCount);
+		iBytes.upload(indexes);
 
 		if ( hasLogicNormal )
 			addBuffer(h3d.Buffer.ofFloats(logicNormals, hxd.BufferFormat.make([{ name : "logicNormal", type : DVec3 }])));
@@ -285,6 +445,15 @@ class BatchPrimitive extends MeshPrimitive {
 		gpuSubPartInfos.uploadBytes(cpuSubPartInfos, 0, subPartCount, 0);
 		gpuLodInfos = new h3d.Buffer(totalLodCount, LOD_INFOS_FMT, [UniformBuffer]);
 		gpuLodInfos.uploadFloats(cpuLodInfos, 0, totalLodCount, 0);
+
+		if ( !isDynamic ) {
+			vBytes = null;
+			logicNormals = null;
+			cpuSubMeshInfos = null;
+			cpuSubPartInfos = null;
+			cpuLodInfos = null;
+			iBytes = null;
+		}
 	}
 
 	override public function getBounds() : h3d.col.Bounds {

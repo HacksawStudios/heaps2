@@ -31,6 +31,7 @@ class Checker {
 	var curFun : TFunction;
 	var inLoop : Bool;
 	var inWhile : Bool;
+	var enums : Map<String, Array<String>>;
 	public var inits : Array<{ v : TVar, e : TExpr }>;
 
 	public function new() {
@@ -60,6 +61,10 @@ class Checker {
 			{ dim : T1D, arr : true, uv : vec2, iuv : ivec2 },
 			{ dim : T2D, arr : true, uv : vec3, iuv : ivec3 },
 			{ dim : TCube, arr : true, uv : vec4, iuv : ivec4 },
+		];
+		var bindlessBufDef = [
+			{ t : TInt, size : SConst(0), kind : Storage },
+			{ t : TFloat, size : SConst(0), kind : Storage }
 		];
 		var gvars = new Map();
 		for( g in Ast.TGlobal.createAll() ) {
@@ -94,7 +99,7 @@ class Checker {
 				[for( t in texDefs ) { args : [{ name : "tex", type : TSampler(t.dim,t.arr) }, { name : "pos", type : t.iuv }, { name : "lod", type : TInt }], ret : vec4 }];
 			case TextureSize:
 				[];
-			case ToInt:
+			case ToInt, ToUInt:
 				[for( t in baseType ) { args : [ { name : "value", type : t } ], ret : TInt } ];
 			case ToFloat:
 				[for( t in baseType ) { args : [ { name : "value", type : t } ], ret : TFloat } ];
@@ -190,6 +195,8 @@ class Checker {
 				[for( i => t in genType ) { args : [ { name: "x", type: t } ], ret: genIType[i] }];
 			case IntBitsToFloat, UintBitsToFloat:
 				[for( i => t in genType ) { args : [ { name: "x", type: genIType[i] } ], ret: t }];
+			case FindLSB, FindMSB, BitCount:
+				[for( i => t in genIType ) { args : [ { name: "x", type: genIType[i] } ], ret: t }];
 			case SetLayout:
 				[
 					{ args : [{ name : "x", type : TInt },{ name : "y", type : TInt },{ name : "z", type : TInt }], ret : TVoid },
@@ -198,9 +205,11 @@ class Checker {
 				];
 			case ImageStore:
 				[];
-			case VertexID, InstanceID, FragCoord, FrontFacing,FragDepth:
+			case VertexID, InstanceID, FragCoord, FrontFacing, FragDepth, Barycentrics:
 				null;
-			case AtomicAdd:
+			case VertexAt:
+				[for( t in genType ) { args : [ { name : "v", type : t }, { name : "index", type : TInt } ], ret : t }];
+			case AtomicAdd, AtomicOr, AtomicAnd:
 				[{ args : [{ name : "buf", type : TBuffer(TInt, SConst(0), RW) },{ name : "index", type : TInt }, { name : "data", type : TInt }], ret : TInt }];
 			case _ if( g.getName().indexOf("_") > 0 ):
 				var name = g.getName();
@@ -229,7 +238,11 @@ class Checker {
 			case UnpackUnorm4x8:
 				[ { args : [ { name : "value", type : TInt } ], ret : vec4 } ];
 			case ResolveSampler:
-				[for( t in texDefs ) { args : [{ name : "handle", type : TTextureHandle }, { name : "tex", type : TSampler(t.dim,t.arr) }], ret : TVoid }];
+				[for( t in texDefs ) { args : [{ name : "handle", type : TTextureHandle }, { name : "tex", type : TSampler(t.dim,t.arr) }], ret : TVoid }].concat(
+				[for( t in texDefs ) { args : [{ name : "handle", type : TVec(2, VInt) }, { name : "tex", type : TSampler(t.dim,t.arr) }], ret : TVoid }]);
+			case ResolveBuffer:
+				[for( b in bindlessBufDef ) { args : [{ name : "handle", type : TBufferHandle }, { name : "buf", type : TBuffer(b.t, b.size, b.kind) }], ret : TVoid }].concat(
+				[for( b in bindlessBufDef ) { args : [{ name : "handle", type : TInt }, { name : "buf", type : TBuffer(b.t, b.size, b.kind) }], ret : TVoid}]);
 			default:
 				throw "Unsupported global "+g;
 			}
@@ -241,6 +254,7 @@ class Checker {
 		globals.set("fragCoord", { t : vec4, g : FragCoord });
 		globals.set("fragDepth", { t : TFloat, g : FragDepth });
 		globals.set("frontFacing", { t : TBool, g : FrontFacing });
+		globals.set("barycentrics", { t : vec3, g : Barycentrics });
 		for( gname => vl in gvars )
 			globals.set(gname, { t : TStruct([
 				for( v in vl )
@@ -253,6 +267,7 @@ class Checker {
 			]), g : null });
 		globals.set("int", globals.get("toInt"));
 		globals.set("float", globals.get("toFloat"));
+		globals.set("uint", globals.get("toUInt"));
 		globals.set("reflect", globals.get("lReflect"));
 		for( i in 2...5 ) {
 			globals.set("ivec"+i, globals.get("iVec"+i));
@@ -279,6 +294,7 @@ class Checker {
 
 	public function check( name : String, shader : Expr ) : ShaderData {
 		vars = new Map();
+		enums = new Map();
 		inits = [];
 		inLoop = false;
 		inWhile = false;
@@ -351,6 +367,22 @@ class Checker {
 			});
 		}
 
+		// enum types are only used for type checking, the shader sees Int
+		function enumVarToInt( v : TVar ) {
+			if( v.type.match(TEnum(_)) ) v.type = TInt;
+		}
+		function enumExprToInt( e : TExpr ) {
+			if( e.t.match(TEnum(_)) ) e.t = TInt;
+			switch( e.e ) {
+			case TVar(v), TVarDecl(v, _): enumVarToInt(v);
+			default:
+			}
+			e.iter(enumExprToInt);
+		}
+		for( v in vars ) enumVarToInt(v);
+		for( f in tfuns ) enumExprToInt(f.expr);
+		for( i in inits ) enumExprToInt(i.e);
+
 		var vars = Lambda.array(vars);
 		vars.sort(function(v1, v2) return (v1.id < 0 ? -v1.id : v1.id) - (v2.id < 0 ? -v2.id : v2.id));
 		return {
@@ -386,6 +418,7 @@ class Checker {
 			switch( [size1,size2] ) {
 			case [SConst(a),SConst(b)] if( a == b ):
 			case [SVar(v1),SVar(v2)] if( v1 == v2 ):
+			case [SConst(_),SVar(v)] | [SVar(v),SConst(_)] if( v.isFinalInt() ):
 			default: return false;
 			}
 			return tryUnify(t1,t2);
@@ -407,10 +440,14 @@ class Checker {
 
 	function unifyExpr( e : TExpr, t : Type ) {
 		if( !tryUnify(e.t, t) ) {
-			if( e.t == TInt && t == TFloat ) {
-				toFloat(e);
+			if( e.t == TInt ) {
+				if( t == TFloat ) {
+					toFloat(e);
+					return;
+				} else if( t == TBool )
+					return;
+			} else if ( e.t == TBool && t == TInt)
 				return;
-			}
 			error(e.t.toString() + " should be " + t.toString(), e.p);
 		}
 	}
@@ -540,7 +577,7 @@ class Checker {
 						type = TFloat;
 						TConst(CFloat(Math.PI));
 					default:
-						error("Unknown identifier '" + name + "'", e.pos);
+						return enumConst(null, name, with, e.pos);
 					}
 				}
 			}
@@ -557,6 +594,19 @@ class Checker {
 				throw "assert";
 			}
 		case EField(e1, f):
+			// qualified enum constructor
+			var path = null;
+			switch( e1.expr ) {
+			case EIdent(name) if( vars.get(name) == null && globals.get(name) == null ):
+				for( p in enums.keys() )
+					if( p == name || StringTools.endsWith(p, "." + name) ) {
+						if( path != null ) error("Ambiguous enum '" + name + "'", e1.pos);
+						path = p;
+					}
+			default:
+			}
+			if( path != null )
+				return enumConst(path, f, with, e.pos);
 			var e1 = typeExpr(e1, Value);
 			var ef = fieldAccess(e1, f, with, e.pos);
 			if( ef == null ) error(e1.t.toString() + " has no field '" + f + "'", e.pos);
@@ -606,6 +656,8 @@ class Checker {
 			switch( e1.expr ) {
 			case EField(e1, f):
 				var e1 = typeExpr(e1, Value);
+				if( f == "toInt" && args.length == 0 && e1.t.match(TEnum(_)) )
+					return { e : e1.e, t : TInt, p : e.pos };
 				var ef = fieldAccess(e1, f, with, e.pos);
 				if( ef == null ) error(e1.t.toString() + " has no field '" + f + "'", e.pos);
 				switch( ef ) {
@@ -648,7 +700,8 @@ class Checker {
 			var v = vl[0];
 			if( v.kind == null ) v.kind = Local;
 			if( v.kind != Local ) error("Should be local var", e.pos);
-			if( v.qualifiers.length != 0 ) error("Unexpected qualifier", e.pos);
+			for( q in v.qualifiers )
+				if( !q.match(Enum(_)) ) error("Unexpected qualifier", e.pos);
 			var tv = makeVar(vl[0],e.pos);
 			var init = v.expr == null ? null : typeWith(v.expr, tv.type);
 			if( tv.type == null ) {
@@ -679,6 +732,13 @@ class Checker {
 				}
 				type = TVoid;
 				TBinop(OpAssignOp(op == OpIncrement ? OpAdd : OpSub), e1, { e : TConst(CInt(1)), t : TInt, p : e1.p });
+			case OpNegBits:
+				switch( e1.t ){
+				case TInt, TVec(_, VInt):
+				default: error("Cannot negate bits of " + e1.t.toString(), e.pos);
+				}
+				type = e1.t;
+				TUnop(op, e1);
 			default:
 				error("Operation non supported", e.pos);
 			}
@@ -826,35 +886,46 @@ class Checker {
 						default:
 						}
 				}
-				var einit = null;
-				if( v.expr != null ) {
-					if( v.kind != Param && v.kind != Local )
-						error("Cannot initialize variable declaration if not @param or local", v.expr.pos);
-					var e = typeExpr(v.expr, v.type == null ? Value : With(v.type));
-					if( v.type == null )
-						v.type = e.t;
-					else
-						unify(e.t, v.type, v.expr.pos);
-					checkConst(e);
-					einit = e;
-				}
-				if( v.type == null ) error("Type required for variable declaration", e.pos);				
+				if( v.expr != null && v.kind != Param && v.kind != Local )
+					error("Cannot initialize variable declaration if not @param or local", v.expr.pos);
+				if( v.type == null && v.expr == null )
+					error("Type required for variable declaration", e.pos);
 				if( isImport && v.kind == Param )
 					continue;
+				if( vars.exists(v.name) )
+					error("Duplicate var decl '" + v.name + "'", e.pos);
 
-				if( vars.exists(v.name) ) error("Duplicate var decl '" + v.name + "'", e.pos);
-				var v = makeVar(v, e.pos);
+				var tv = null;
+				var einit = null;
+				if( v.type != null ) {
+					tv = makeVar(v, e.pos);
+					if( v.expr != null ) {
+						einit = typeExpr(v.expr, With(tv.type));
+						unify(einit.t, tv.type, v.expr.pos);
+					}
+				} else {
+					einit = typeExpr(v.expr, Value);
+					v.type = einit.t;
+					tv = makeVar(v, e.pos);
+				}
+				if( einit != null ) {
+					if( tv.isFinalConst() )
+						checkConstValue(einit)
+					else
+						checkConst(einit);
+				}
 
-				switch( v.type ) {
+				switch( tv.type ) {
 				case TSampler(T3D, true), TRWTexture(T3D, true, _), TRWTexture(_,_,3):
 					error("Unsupported texture type", e.pos);
 				default:
 				}
-				if( einit != null )
-					inits.push({ v : v, e : einit });
-				else if( v.qualifiers != null && v.qualifiers.indexOf(Final) >= 0 )
+				var isFinal = tv.hasQualifier(Final);
+				if( einit != null ) {
+					inits.push({ v : tv, e : einit });
+				} else if( isFinal )
 					error("Final variable needs initializer", e.pos);
-				vars.set(v.name, v);
+				vars.set(tv.name, tv);
 			}
 		case ECall( { expr : EIdent("import") }, [e]):
 			var path = [];
@@ -892,6 +963,27 @@ class Checker {
 		}
 	}
 
+	function checkConstValue( e : TExpr ) {
+		switch( e.e ) {
+		case TConst(_):
+		case TVar(v) if( v.isFinalConst() ):
+		case TParenthesis(e): checkConstValue(e);
+		case TCall({ e : TGlobal(ToFloat) }, [e]): checkConstValue(e);
+		case TUnop(OpNeg | OpNot | OpNegBits, e): checkConstValue(e);
+		case TIf(econd, eif, eelse) if( eelse != null ):
+			checkConstValue(econd);
+			checkConstValue(eif);
+			checkConstValue(eelse);
+		case TBinop(OpAssign | OpAssignOp(_) | OpInterval, _, _):
+			error("This expression should be constant", e.p);
+		case TBinop(_, e1, e2):
+			checkConstValue(e1);
+			checkConstValue(e2);
+		default:
+			error("This expression should be constant", e.p);
+		}
+	}
+
 	function checkConst( e : TExpr ) {
 		switch( e.e ) {
 		case TConst(_):
@@ -903,6 +995,26 @@ class Checker {
 		default:
 			error("This expression should be constant", e.p);
 		}
+	}
+
+	function enumConst( path : String, name : String, with : WithType, pos : Position ) : TExpr {
+		if( path == null ) {
+			// emulate type inference: use the expected enum type, or the constructor name must be unique
+			switch( with ) {
+			case With(TEnum(p)) if( enums.get(p).indexOf(name) >= 0 ):
+				path = p;
+			default:
+				for( p => cl in enums )
+					if( cl.indexOf(name) >= 0 ) {
+						if( path != null ) error("Ambiguous enum constructor '" + name + "'", pos);
+						path = p;
+					}
+				if( path == null ) error("Unknown identifier '" + name + "'", pos);
+			}
+		}
+		var index = enums.get(path).indexOf(name);
+		if( index < 0 ) error(name + " is not a constructor of " + path, pos);
+		return { e : TConst(CInt(index)), t : TEnum(path), p : pos };
 	}
 
 	function makeVar( v : VarDecl, pos : Position, ?parent : TVar ) {
@@ -956,11 +1068,11 @@ class Checker {
 					default:
 						error("Precision qualifier not supported on " + v.type, pos);
 					}
-				case Range(min,max):
+				case Range(_,_):
 					switch( v.type ) {
 					case TFloat, TInt, TVec(_, VFloat):
 					default:
-						error("Precision qualifier not supported on " + v.type, pos);
+						error("Range qualifier not supported on " + v.type, pos);
 					}
 				case Borrow(source):
 					if ( v.kind != Local ) error("Borrow should not have a type qualifier", pos);
@@ -972,6 +1084,13 @@ class Checker {
 				case Ignore, Doc(_):
 				case Flat: if( tv.kind != Local ) error("flat only allowed on local", pos);
 				case NoVar: if( tv.kind != Local ) error("noVar only allowed on local", pos);
+				case Enum(path, constructors):
+					enums.set(path, constructors);
+					tv.type = TEnum(path);
+					// @const max value is known
+					for( i in 0...v.qualifiers.length )
+						if( v.qualifiers[i].match(Const(null)) )
+							v.qualifiers[i] = Const(constructors.length > 1 ? constructors.length - 1 : 1);
 				}
 		}
 		if( tv.type != null )
@@ -1029,7 +1148,7 @@ class Checker {
 					if( v2 == null ) break;
 				}
 				if( v2 == null ) error("Array size variable '" + v.name + "'not found", pos);
-				if( !v2.isConst() ) error("Array size variable '" + v.name + "'should be a constant", pos);
+				if( !v2.isConst() && !v2.isFinalInt() ) error("Array size variable '" + v.name + "'should be a constant", pos);
 				SVar(v2);
 			}
 			t = makeVarType(t,parent,pos);
@@ -1378,6 +1497,7 @@ class Checker {
 			case [_, TInt, TVec(_,VInt)]: e2.t;
 			case [_, TVec(_,VInt), TInt]: e1.t;
 			case [OpMult, TMat4, TMat4]: TMat4;
+			case [OpMult, TMat3, TMat3]: TMat3;
 			default:
 				var opName = switch( op ) {
 				case OpMult: "multiply";
@@ -1393,7 +1513,7 @@ class Checker {
 			case TFloat, TInt, TString if( e2.t != TVoid ):
 				unifyExpr(e2, e1.t);
 				TBool;
-			case TBool if( (op == OpEq || op == OpNotEq) && e2.t != TVoid ):
+			case TBool, TEnum(_) if( (op == OpEq || op == OpNotEq) && e2.t != TVoid ):
 				unifyExpr(e2, e1.t);
 				TBool;
 			case TVec(_) if( e2.t != TVoid ):

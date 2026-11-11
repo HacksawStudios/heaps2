@@ -11,18 +11,11 @@ enum CubeFaceFlag {
 
 class CubeShadowMap extends Shadows {
 
-	var depth : h3d.mat.Texture;
 	var mergePass = new h3d.pass.ScreenFx(new h3d.shader.MinMaxShader.CubeMinMaxShader());
 	public var faceMask(default, null) : haxe.EnumFlags<CubeFaceFlag>;
+	var linearDepth = new h3d.shader.LinearShadowDepth();
 
-	var cubeDir = [ h3d.Matrix.L([0,0,-1,0, 0,-1,0,0, 1,0,0,0]),
-					h3d.Matrix.L([0,0,1,0, 0,-1,0,0, -1,0,0,0]),
-	 				h3d.Matrix.L([1,0,0,0, 0,0,1,0, 0,1,0,0]),
-	 				h3d.Matrix.L([1,0,0,0, 0,0,-1,0, 0,-1,0,0]),
-				 	h3d.Matrix.L([1,0,0,0, 0,-1,0,0, 0,0,1,0]),
-				 	h3d.Matrix.L([-1,0,0,0, 0,-1,0,0, 0,0,-1,0]) ];
-
-	public function new( light : h3d.scene.Light, useWorldDist : Bool ) {
+	public function new( light : h3d.scene.Light ) {
 		super(light);
 		lightCamera = new h3d.Camera();
 		lightCamera.screenRatio = 1.0;
@@ -42,12 +35,11 @@ class CubeShadowMap extends Shadows {
 
 	override function dispose() {
 		super.dispose();
-		if( depth != null ) depth.dispose();
 		if( tmpTex != null) tmpTex.dispose();
 	}
 
-	override function isUsingWorldDist(){
-		return true;
+	override function processShaders( p : h3d.pass.PassObject, shaders : hxsl.ShaderList ) {
+		return ctx.allocShaderList(linearDepth, super.processShaders(p, shaders));
 	}
 
 	override function saveStaticData() {
@@ -76,18 +68,10 @@ class CubeShadowMap extends Shadows {
 		staticTexture = new h3d.mat.Texture(size, size, [Target, Cube], format);
 		staticTexture.name = "staticTexture";
 		staticTexture.preventAutoDispose();
-		staticTexture.realloc = function () {
-			if( pixelsForRealloc != null && pixelsForRealloc.length == 6 ) {
-				for( i in 0 ... 6 ) {
-					var pixels = pixelsForRealloc[i];
-					staticTexture.uploadPixels(pixels, 0, i);
-				}
-			}
-		}
+		staticTexture.realloc = null;
 		return staticTexture;
 	}
 
-	var pixelsForRealloc : Array<hxd.Pixels> = null;
 	override function loadStaticData( bytes : haxe.io.Bytes ) {
 		if( (mode != Mixed && mode != Static) || bytes == null || bytes.length == 0 )
 			return false;
@@ -96,15 +80,18 @@ class CubeShadowMap extends Shadows {
 		if( size != this.size )
 			return false;
 
-		createStaticTexture();
-
-		pixelsForRealloc = [];
+		var faces = [];
 		for( i in 0 ... 6 ) {
 			var len = buffer.readInt32();
-			var pixels = new hxd.Pixels(size, size, haxe.zip.Uncompress.run(buffer.read(len)), format);
-			pixelsForRealloc.push(pixels);
-			staticTexture.uploadPixels(pixels, 0, i);
+			var data = haxe.zip.Uncompress.run(buffer.read(len));
+			if( data.length != hxd.Pixels.calcDataSize(size, size, format) )
+				return false;
+			faces.push(new hxd.Pixels(size, size, data, format));
 		}
+		createStaticTexture();
+		for( i in 0 ... 6 )
+			staticTexture.uploadPixels(faces[i], 0, i);
+		updateCamera();
 		syncShader(staticTexture);
 
 		return true;
@@ -116,7 +103,7 @@ class CubeShadowMap extends Shadows {
 			return tmpTex;
 		tmpTex = new h3d.mat.Texture(1,1, [Target,Cube], format);
 		tmpTex.name = "defaultCubeShadowMap";
-		tmpTex.realloc = function() clear(tmpTex);
+		tmpTex.realloc = null;
 		clear(tmpTex);
 		return tmpTex;
 	}
@@ -129,6 +116,12 @@ class CubeShadowMap extends Shadows {
 	}
 
 	function updateLightCameraNearFar(light : h3d.scene.Light) {
+	}
+
+	function updateCamera() {
+		var absPos = light.getAbsPos();
+		lightCamera.pos.set(absPos.tx, absPos.ty, absPos.tz);
+		updateLightCameraNearFar(light);
 	}
 
 	function createCollider(light : h3d.scene.Light) : h3d.col.Collider {
@@ -146,6 +139,7 @@ class CubeShadowMap extends Shadows {
 		if( !enabled )
 			return;
 
+		updateCamera();
 		if( !filterPasses(passes) )
 			return;
 
@@ -165,18 +159,13 @@ class CubeShadowMap extends Shadows {
 		var computingStatic = ctx.computingStatic || updateStatic;
 
 		var texture = computingStatic ? createStaticTexture() : ctx.textures.allocTarget("pointShadowMap", size, size, false, format, [Cube]);
-		if( depth == null || depth.width != texture.width || depth.height != texture.height || depth.isDisposed() ) {
-			if( depth != null ) depth.dispose();
-			depth = new h3d.mat.Texture(texture.width, texture.height, Depth24Stencil8);
-		}
-		texture.depthBuffer = depth;
-
-		var absPos = light.getAbsPos();
-		lightCamera.pos.set(absPos.tx, absPos.ty, absPos.tz);
-		updateLightCameraNearFar(light);
+		// For depth test only, shared between faces.
+		texture.depthBuffer = ctx.textures.allocTarget("pointShadowDepth", size, size, false, Depth32);
 
 		var prevFar = @:privateAccess ctx.cameraFar;
 		var prevPos = @:privateAccess ctx.cameraPos;
+		var prevView = @:privateAccess ctx.cameraView;
+		var prevProj = @:privateAccess ctx.cameraProj;
 		var prevViewProj = @:privateAccess ctx.cameraViewProj;
 
 		for( i in 0...6 ) {
@@ -200,7 +189,9 @@ class CubeShadowMap extends Shadows {
 			ctx.engine.pushTarget(texture, i);
 			format == RGBA ? ctx.engine.clear(0xFFFFFF, nullOne) : ctx.engine.clearF(clearDepthColor, nullOne);
 
-			@:privateAccess ctx.cameraViewProj = getShadowProj();
+			@:privateAccess ctx.cameraView = getShadowView();
+			@:privateAccess ctx.cameraProj = getShadowProj();
+			@:privateAccess ctx.cameraViewProj = getShadowViewProj();
 			@:privateAccess ctx.cameraFar = lightCamera.zFar;
 			@:privateAccess ctx.cameraPos = lightCamera.pos;
 
@@ -211,6 +202,8 @@ class CubeShadowMap extends Shadows {
 
 		@:privateAccess ctx.cameraFar = prevFar;
 		@:privateAccess ctx.cameraPos = prevPos;
+		@:privateAccess ctx.cameraView = prevView;
+		@:privateAccess ctx.cameraProj = prevProj;
 		@:privateAccess ctx.cameraViewProj = prevViewProj;
 
 		// Blur is applied even if there's no shadows - TO DO : remove the useless blur pass
@@ -235,7 +228,7 @@ class CubeShadowMap extends Shadows {
 			if( !faceMask.has(CubeFaceFlag.createByIndex(i)) ) continue;
 			mergePass.shader.texA = dynamicTex;
 			mergePass.shader.texB = staticTexture;
-			mergePass.shader.mat = cubeDir[i];
+			mergePass.shader.mat = h3d.mat.Texture.getCubeFaceMatrix(i);
 			ctx.engine.pushTarget(merge, i);
 			mergePass.render();
 			ctx.engine.popTarget();

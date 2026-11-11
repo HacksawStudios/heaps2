@@ -7,11 +7,12 @@ enum RenderMode {
 	Mixed;
 }
 
-enum ShadowSamplingKind {
-		None;
-		PCF;
-		ESM;
-	}
+// Keep in sync with h3d.shader.ShadowSampling
+enum abstract ShadowSamplingKind(Int) to Int {
+	var None = 0;
+	var ESM = 1;
+	var PCF = 2;
+}
 
 class Shadows extends Output {
 
@@ -29,13 +30,12 @@ class Shadows extends Output {
 	public var samplingKind : ShadowSamplingKind = None;
 	public var power = 30.0;
 	public var bias = 0.01;
-	public var pcfQuality = 1;
 	public var pcfScale = 1.0;
 
 	public function new(light) {
 		if( format == null ) format = R16F;
 		if( !h3d.Engine.getCurrent().driver.isSupportedFormat(format) ) format = h3d.mat.Texture.nativeFormat;
-		super("shadow", getOutputs());
+		super("shadow", format == h3d.mat.Texture.nativeFormat ? [PackFloat(Value("output.depth"))] : [Swiz(Value("output.depth",1),[X,X,X,X])]);
 		this.light = light;
 		blur = new Blur(5);
 		blur.quality = 0.5;
@@ -66,25 +66,27 @@ class Shadows extends Output {
 		if( staticTexture != null ) staticTexture.dispose();
 	}
 
+	override function draw( passes : h3d.pass.PassList, ?sort : h3d.pass.PassList -> Void ) {
+		var prev = ctx.visibilityFrustum;
+		if( lightCamera != null ) ctx.visibilityFrustum = lightCamera.frustum;
+		super.draw(passes, sort);
+		ctx.visibilityFrustum = prev;
+	}
+
+	public function getShadowView() {
+		return lightCamera.mcam;
+	}
+
 	public function getShadowProj() {
+		return lightCamera.mproj;
+	}
+
+	public function getShadowViewProj() {
 		return lightCamera.m;
 	}
 
 	public function getShadowTex() : h3d.mat.Texture {
 		return null;
-	}
-
-	function isUsingWorldDist(){
-		return false;
-	}
-
-	function getOutputs() : Array<hxsl.Output> {
-		if(isUsingWorldDist())
-			return [Swiz(Value("output.worldDist",1),[X,X,X,X])];
-
-		if( format == h3d.mat.Texture.nativeFormat )
-			return [PackFloat(Value("output.depth"))];
-		return [Swiz(Value("output.depth",1),[X,X,X,X])];
 	}
 
 	public function loadStaticData( bytes : haxe.io.Bytes ) {
@@ -99,21 +101,71 @@ class Shadows extends Output {
 		throw "Not implemented";
 	}
 
-	/**
-	 * Triggers update of static part of shadows (if any).
-	**/ 
-	public function needStaticUpdate() {
+	public function hasStaticShadow() {
 		switch ( mode ) {
 		case Mixed, Static:
-			updateStatic = true;
+			return true;
 		case None, Dynamic:
+			return false;
 		}
+	}
+
+	/**
+	 * Triggers update of static part of shadows (if any).
+	**/
+	public function needStaticUpdate() {
+		updateStatic = hasStaticShadow();
 	}
 
 	function createDefaultShadowMap() {
 		var tex = h3d.mat.Texture.fromColor(0xFFFFFF);
 		tex.name = "defaultShadowMap";
 		return tex;
+	}
+
+	var g : h3d.scene.Graphics;
+	public var debug : Bool;
+
+	function drawBounds(invViewModel : h3d.Matrix, color : Int) {
+
+		inline function unproject(screenX, screenY, camZ) {
+			var p = new h3d.Vector(screenX, screenY, camZ);
+			p.project(invViewModel);
+			return p;
+		}
+
+		var nearPlaneCorner = [unproject(-1, 1, 0), unproject(1, 1, 0), unproject(1, -1, 0), unproject(-1, -1, 0)];
+		var farPlaneCorner = [unproject(-1, 1, 1), unproject(1, 1, 1), unproject(1, -1, 1), unproject(-1, -1, 1)];
+
+		g.lineStyle(1, color);
+
+		// Near Plane
+		var last = nearPlaneCorner[nearPlaneCorner.length - 1];
+		inline function moveTo(x : Float, y : Float, z : Float) {
+			g.moveTo(x - ctx.scene.x, y - ctx.scene.y, z - ctx.scene.z);
+		}
+		inline function lineTo(x : Float, y : Float, z : Float) {
+			g.lineTo(x - ctx.scene.x, y - ctx.scene.y, z - ctx.scene.z);
+		}
+		moveTo(last.x,last.y,last.z);
+		for( fc in nearPlaneCorner ) {
+			lineTo(fc.x, fc.y, fc.z);
+		}
+
+		// Far Plane
+		var last = farPlaneCorner[farPlaneCorner.length - 1];
+		moveTo(last.x,last.y,last.z);
+		for( fc in farPlaneCorner ) {
+			lineTo(fc.x, fc.y, fc.z);
+		}
+
+		// Connections
+		for( i in 0 ... 4 ) {
+			var np = nearPlaneCorner[i];
+			var fp = farPlaneCorner[i];
+			moveTo(np.x, np.y, np.z);
+			lineTo(fp.x, fp.y, fp.z);
+		}
 	}
 
 	function syncEarlyExit() {

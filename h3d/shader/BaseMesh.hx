@@ -57,28 +57,44 @@ class BaseMesh extends hxsl.Shader {
 		var specColor : Vec3;
 		var worldDist : Float;
 		var pixelVelocity : Vec2;
-		var prevModelView : Mat3x4;
+		var modelView : Mat4;
+		var modelViewInverse : Mat4;
+		var prevModelView : Mat4;
 
 		@param var color : Vec4;
 		@range(0,100) @param var specularPower : Float;
 		@range(0,10) @param var specularAmount : Float;
 		@param var specularColor : Vec3;
+		@const var IS_STATIC : Bool = false;
+
+		function transformNormal( n : Vec3, m : Mat4 ) : Vec3 {
+			var axisX = vec3(m[0].x, m[1].x, m[2].x);
+			var axisY = vec3(m[0].y, m[1].y, m[2].y);
+			var axisZ = vec3(m[0].z, m[1].z, m[2].z);
+			var s2 = vec3(dot(axisX, axisX), dot(axisY, axisY), dot(axisZ, axisZ));
+			return ((n * (s2.yzx * s2.zxy)) * m.mat3()).normalize();
+		}
 
 		// each __init__ expr is out of order dependency-based
 		function __init__() {
 			relativePosition = input.position;
-			transformedPosition = relativePosition * global.modelView.mat3x4();
+			modelView = global.modelView;
+			modelViewInverse = global.modelViewInverse;
+			transformedPosition = relativePosition * modelView.mat3x4();
 			projectedPosition = vec4(transformedPosition, 1) * camera.viewProj;
-			prevModelView = global.previousModelView.mat3x4();
-			previousTransformedPosition = relativePosition * prevModelView;
+			prevModelView = IS_STATIC ? modelView : global.previousModelView;
+			previousTransformedPosition = relativePosition * prevModelView.mat3x4();
 			previousProjectedPosition = vec4(previousTransformedPosition, 1) * camera.previousViewProj;
-			transformedNormal = (input.normal * global.modelView.mat3()).normalize();
 			camera.dir = (camera.position - transformedPosition).normalize();
 			pixelColor = color;
 			specPower = specularPower;
 			specColor = specularColor * specularAmount;
 			screenUV = screenToUv(projectedPosition.xy / projectedPosition.w);
 			depth = projectedPosition.z / projectedPosition.w;
+		}
+
+		function __init__vertex() {
+			transformedNormal = transformNormal(input.normal, modelView);
 			worldDist = length(transformedPosition - camera.position) / camera.zFar;
 		}
 

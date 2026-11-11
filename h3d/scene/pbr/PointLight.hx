@@ -12,7 +12,7 @@ class PointLight extends Light {
 
 	public function new(?parent) {
 		pbr = new h3d.shader.pbr.Light.PointLight();
-		shadows = new h3d.pass.PointShadowMap(this, true);
+		shadows = new h3d.pass.PointShadowMap(this);
 		super(pbr,parent);
 		range = 10;
 		primitive = h3d.prim.Sphere.defaultUnitSphere();
@@ -27,18 +27,17 @@ class PointLight extends Light {
 	}
 
 	function get_range() {
-		var minScale = 1.0;
-		var p = parent;
-		while (p != null) {
-			minScale *= hxd.Math.min(p.scaleX, hxd.Math.min(p.scaleY, p.scaleZ));
-			p = p.parent;
-		}
-		return scaleX * minScale;
+		return scaleX * getParentScale();
 	}
 
 	function set_range(v:Float) {
 		setScale(v);
 		return v;
+	}
+
+	override function getUnitlessIntensity() : Float {
+		var power = power * 10; // base scale
+		return power * power;
 	}
 
 	override function draw(ctx:RenderContext) {
@@ -51,11 +50,11 @@ class PointLight extends Light {
 		pbr.lightColor.load(_color);
 		var range = hxd.Math.max(range, 1e-10);
 		var size = hxd.Math.min(size, range);
-		var power = power * 10; // base scale
-		pbr.lightColor.scale(power * power);
+		pbr.lightColor.scale(getIntensity());
 		pbr.lightPos.set(absPos.tx, absPos.ty, absPos.tz);
 		pbr.invLightRange4 = 1 / (range * range * range * range);
 		pbr.pointSize = size;
+		pbr.inverseSquareFalloff = hasInverseSquareFalloff();
 		pbr.occlusionFactor = occlusionFactor;
 	}
 

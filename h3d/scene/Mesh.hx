@@ -85,23 +85,23 @@ class Mesh extends Object {
 	}
 
 	function calcScreenRatio( ctx : RenderContext ) {
-		if ( primitive == null || primitive.lodCount() == 1 )
+		if (primitive == null || (primitive.lodCount() == 1 && primitive.getCullingScreenRatio() == 0.))
 			return;
 
-		if ( ctx.forcedScreenRatio >= 0.0 ) {
+		if (ctx.forcedScreenRatio >= 0.0) {
 			curScreenRatio = ctx.forcedScreenRatio;
 			return;
 		}
 
 		var bounds = primitive.getBounds();
-		if ( bounds == null ) {
+		if (bounds == null) {
 			curScreenRatio = 1.0;
 			return;
 		}
 
-		curScreenRatio = screenRatio(getAbsPos(), bounds, ctx.camera);
+		curScreenRatio = screenRatio(getAbsPos(), bounds, ctx.camera) * ctx.meshLodScale;
 
-		if ( inheritLod )
+		if (inheritLod)
 			ctx.forcedScreenRatio = curScreenRatio;
 	}
 
@@ -152,14 +152,16 @@ class Mesh extends Object {
 	}
 
 	public static function screenRatio(absPos : h3d.Matrix, bounds : h3d.col.Bounds, camera : h3d.Camera) {
-		var worldCenter = absPos.getPosition();
+		var worldCenter = bounds.getCenter();
+		worldCenter.transform(absPos);
 		var worldScale = absPos.getScale();
-		var worldRadius = hxd.Math.abs(bounds.getBoundingRadius() * hxd.Math.max(worldScale.x, hxd.Math.max(worldScale.y, worldScale.z)));
+		var maxScale = hxd.Math.max(hxd.Math.abs(worldScale.x), hxd.Math.max(hxd.Math.abs(worldScale.y), hxd.Math.abs(worldScale.z)));
+		var worldRadius = bounds.getBoundingSphereRadius() * maxScale;
 		var distanceFromCamera = (worldCenter - camera.pos).length();
 
 		var screenMultiple = hxd.Math.max(0.5 * camera.mproj._11, 0.5 * camera.mproj._22);
 
-		var screenRadius = screenMultiple * worldRadius / hxd.Math.max(1.0, distanceFromCamera);
+		var screenRadius = screenMultiple * worldRadius / hxd.Math.max(camera.zNear, distanceFromCamera);
 
 		return screenRadius * 2.0;
 	}

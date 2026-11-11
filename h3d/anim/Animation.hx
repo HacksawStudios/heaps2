@@ -107,6 +107,19 @@ class Animation {
 		}
 	}
 
+	public function getEvent(frame : Int, name : String) : Event {
+		if (events == null || events[frame] == null)
+			return null;
+
+		for (e in events[frame]) {
+			if (e.name == name && e.frame == frame) {
+				return e;
+			}
+		}
+
+		return null;
+	}
+
 	public function addEvent(frame : Int, name : String, ?originalEvent : Event) {
 		if (events == null)
 			events = [];
@@ -177,13 +190,13 @@ class Animation {
 		var data = Reflect.field(animationData, resourcePath.split("/").pop());
 		var eventsData : Array<Dynamic> = Reflect.field(data, "events");
 
-		events = [];
-
 		// Backward compatibility
 		if (eventsData != null && eventsData.length > 0 && Reflect.hasField(eventsData[0], "data")) {
+			events = [];
 			setEvents([for (e in eventsData) { frame: e.frame, name: e.data }]);
 		}
 		else {
+			events = [];
 			if (sourceEvents != null) {
 				for (se in sourceEvents) {
 					var overrideEvent : Event = null;

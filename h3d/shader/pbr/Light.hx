@@ -4,11 +4,43 @@ class LightEvaluation extends hxsl.Shader {
 
 	static var SRC = {
 
+		// Helpers
+		function closestPointLineToPoint( l0 : Vec3, l1 : Vec3, p : Vec3) : Vec3 {
+			var l01 = l1 - l0;
+			var t = dot(p - l0, l01) / dot(l01, l01);
+			return l0 + saturate(t) * l01;
+		}
+
+		function closestPointLineToRay( l0 : Vec3, l1 : Vec3, r : Vec3 ) : Vec3 {
+			var l01 = l1 - l0;
+			var a = dot(l01, l01);
+			var b = dot(r, l01);
+			var t = saturate(dot(l0, b * r - l01) / ( a - b*b) );
+
+			return l0 + t * l01;
+		}
+
+		function tracePlane(rayOrigin : Vec3, rayDirection : Vec3, planeOrigin : Vec3, planeNormal : Vec3) : Vec3 {
+			var distanceToPlane = dot(planeNormal, (planeOrigin - rayOrigin) / dot(planeNormal, rayDirection));
+			return rayOrigin + rayDirection * distanceToPlane;
+		}
+
+		function closestPointOnRectangle( center : Vec3, normal : Vec3, right : Vec3, up : Vec3, halfSize : Vec2, rayOrigin : Vec3, rayDirection : Vec3 ) : Vec3 {
+			var p = tracePlane(rayOrigin, rayDirection, center, normal) - center;
+			return center + clamp(dot(p, right), -halfSize.x, halfSize.x) * right
+			              + clamp(dot(p, up), -halfSize.y, halfSize.y) * up;
+		}
+
+		function pointLightIntensity( delta : Vec3, size : Float, invRange4 : Float, minDist2 : Float, inverseSquareFalloff : Bool ) : Float {
+			return inverseSquareFalloff ? inverseSquareIntensity(delta, minDist2, invRange4) : legacyLightIntensity(delta, size, invRange4);
+		}
+
 		/*
 			UE4 [Karis12] "Real Shading in Unreal Engine 4"
 			Modified with pointSize
+			Falloff used when inverseSquareFalloff is off.
 		*/
-		function pointLightIntensity( delta : Vec3, size : Float, invRange4 : Float ) : Float {
+		function legacyLightIntensity( delta : Vec3, size : Float, invRange4 : Float ) : Float {
 			var dist = delta.dot(delta);
 			var falloff = saturate(1 - dist*dist * invRange4);
 			if( size > 0 ) {
@@ -20,21 +52,67 @@ class LightEvaluation extends hxsl.Shader {
 			return falloff;
 		}
 
-		function spotLightIntensity( delta : Vec3, lightDir : Vec3, range : Float, invRange4 : Float, angleFallOff : Float, angle : Float ) : Vec2 {
+		function inverseSquareIntensity( delta : Vec3, minDist2 : Float, invRange4 : Float ) : Float {
 			var dist = delta.dot(delta);
 			var falloff = saturate(1 - dist*dist * invRange4);
-			if( range > 0 ) {
-				dist = (dist.sqrt() - range).max(0.);
-				dist *= dist;
-			}
 			falloff *= falloff;
-			falloff *= 1 / (dist + 1);
+			return falloff / max(dist, max(minDist2, 0.0001));
+		}
+
+		function spotLightIntensity( delta : Vec3, lightDir : Vec3, range : Float, invRange4 : Float, angleFallOff : Float, angle : Float, inverseSquareFalloff : Bool ) : Vec2 {
+			var falloff = inverseSquareFalloff ? inverseSquareIntensity(delta, 0., invRange4) : legacyLightIntensity(delta, range, invRange4);
 
 			var theta = dot(delta.normalize(), -lightDir);
 			var epsilon = angleFallOff - angle;
 			var angleFalloff = clamp((theta - angle) / epsilon, 0.0, 1.0);
 
 			return vec2(falloff, angleFalloff);
+		}
+
+		function rectangleLightIntensity( delta : Vec3, lightDir : Vec3, right : Vec3, up : Vec3, angles : Vec4 ) : Float {
+			var epsilon = 0.00001;
+			var invLightDir = -lightDir;
+
+			var xyEpsilon = angles.y - angles.x + epsilon;
+			var xyLightDir = invLightDir - dot(invLightDir, up) * up;
+			var xyDelta = delta - dot(delta, up) * up;
+			var xyTheta = dot(xyDelta.normalize(), xyLightDir.normalize());
+			var horizontalFalloff = saturate((xyTheta - angles.x) / xyEpsilon);
+
+			var xzEpsilon = angles.w - angles.z + epsilon;
+			var xzLightDir = invLightDir - dot(invLightDir, right) * right;
+			var xzDelta = delta - dot(delta, right) * right;
+			var xzTheta = dot(xzDelta.normalize(), xzLightDir.normalize());
+			var verticalFalloff = saturate((xzTheta - angles.z) / xzEpsilon);
+
+			return verticalFalloff * horizontalFalloff;
+		}
+
+		function capsuleLightDiffuse( lightPos : Vec3, left : Vec3, halfLength : Float, radius : Float, invRange4 : Float, position : Vec3, inverseSquareFalloff : Bool ) : Vec4 {
+			var spherePos = closestPointLineToPoint(lightPos - halfLength * left, lightPos + halfLength * left, position);
+			var delta = spherePos - position;
+			var minDist2 = radius * radius + 4 * radius * halfLength / PI;
+			return vec4(delta.normalize(), pointLightIntensity(delta, radius, invRange4, minDist2, inverseSquareFalloff));
+		}
+
+		function capsuleLightSpecularDir( lightPos : Vec3, left : Vec3, halfLength : Float, radius : Float, position : Vec3, r : Vec3 ) : Vec3 {
+			var l0 = lightPos - halfLength * left - position;
+			var l1 = lightPos + halfLength * left - position;
+			var closestPoint = closestPointLineToRay(l0, l1, r);
+			var centerToRay = dot(closestPoint, r) * r - closestPoint;
+			closestPoint = closestPoint + centerToRay * saturate(radius / length(centerToRay));
+			return normalize(closestPoint);
+		}
+
+		function rectangleLightDiffuse( center : Vec3, lightDir : Vec3, right : Vec3, up : Vec3, halfSize : Vec2, angles : Vec4, range : Float, invRange4 : Float, position : Vec3, inverseSquareFalloff : Bool ) : Vec4 {
+			var delta = closestPointOnRectangle(center, lightDir, right, up, halfSize, position, lightDir) - position;
+			var minDist2 = 4 * halfSize.x * halfSize.y / PI;
+			var intensity = rectangleLightIntensity(delta, lightDir, right, up, angles) * pointLightIntensity(delta, range, invRange4, minDist2, inverseSquareFalloff);
+			return vec4(normalize(delta), intensity);
+		}
+
+		function rectangleLightSpecularDir( center : Vec3, lightDir : Vec3, right : Vec3, up : Vec3, halfSize : Vec2, position : Vec3, r : Vec3 ) : Vec3 {
+			return normalize(closestPointOnRectangle(center, lightDir, right, up, halfSize, position, r) - position);
 		}
 	};
 }
@@ -52,6 +130,7 @@ class Light extends LightEvaluation {
 
 		@param var lightColor = vec3(0.5, 0.5, 0.5);
 		@param var occlusionFactor = 0.0;
+		@param var inverseSquareFalloff : Bool;
 	};
 }
 
@@ -73,7 +152,7 @@ class SpotLight extends Light {
 		function fragment() {
 			var delta = lightPos - transformedPosition;
 			pbrLightDirection = delta.normalize();
-			var fallOffInfo =  spotLightIntensity(delta, spotDir, range, invLightRange4, fallOff, angle);
+			var fallOffInfo = spotLightIntensity(delta, spotDir, range, invLightRange4, fallOff, angle, inverseSquareFalloff);
 			var fallOff = fallOffInfo.x;
 			var fallOffInfoAngle = fallOffInfo.y;
 			pbrLightColor = fallOff * lightColor;
@@ -104,7 +183,7 @@ class PointLight extends Light {
 		function fragment() {
 			var delta = lightPos - transformedPosition;
 			pbrLightDirection = delta.normalize();
-			pbrLightColor = pointLightIntensity(delta, pointSize, invLightRange4) * lightColor;
+			pbrLightColor = pointLightIntensity(delta, pointSize, invLightRange4, pointSize * pointSize, inverseSquareFalloff) * lightColor;
 			pbrOcclusionFactor = occlusionFactor;
 		}
 	};
@@ -149,41 +228,12 @@ class CapsuleLight extends Light {
 		@param var halfLength : Float;
 		@param var left : Vec3;
 
-		function closestPointOnSegment( a : Vec3, b : Vec3, c : Vec3) : Vec3 {
-			var ab = b - a;
-			var t = dot(c - a, ab) / dot(ab, ab);
-			return a + saturate(t) * ab;
-		}
-
-		var pixelColor : Vec4;
 		var view : Vec3;
 		function fragment() {
-			var P0 = lightPos - halfLength * left;
-			var P1 = lightPos + halfLength * left;
-
-			// Diffuse: place a point light on the closest point on the sphere placed on the closest position on the segment.
-			var spherePos = closestPointOnSegment(P0, P1, transformedPosition);
-			var delta = spherePos - transformedPosition;
-			pbrLightDirection = delta.normalize();
-			var closestPointDiffuse = spherePos - pbrLightDirection * saturate((length(delta) - 1e-5) / radius) * radius;
-			delta = closestPointDiffuse - transformedPosition;
-			pbrLightDirection = normalize(delta);
-
-			// Attenuation.
-			var falloff = pointLightIntensity(delta, radius, invRange4);
-
-			// Specular.
-			var R = view - 2.0 * dot(view, normal) * normal;
-			var posToLight = lightPos - transformedPosition;
-			// Intersect a light plane with reflected ray and place a sphere on the closest point on segment.
-			var onPlane = transformedPosition + R * dot(posToLight, R);
-			var spherePosSpec = closestPointOnSegment(P0, P1, onPlane);
-			pbrSpecularLightDirection = normalize(spherePosSpec - transformedPosition);
-			// Get closest point on the sphere.
-			var closestPointSpecular = spherePosSpec - pbrSpecularLightDirection * saturate(length(spherePosSpec - transformedPosition) - 1e-5 / radius) * radius;
-			pbrSpecularLightDirection = normalize(closestPointSpecular - transformedPosition);
-
-			pbrLightColor = falloff * lightColor;
+			var light = capsuleLightDiffuse(lightPos, left, halfLength, radius, invRange4, transformedPosition, inverseSquareFalloff);
+			pbrLightDirection = light.xyz;
+			pbrLightColor = light.w * lightColor;
+			pbrSpecularLightDirection = capsuleLightSpecularDir(lightPos, left, halfLength, radius, transformedPosition, reflect(-view, normal));
 			pbrOcclusionFactor = occlusionFactor;
 		}
 	};
@@ -193,12 +243,9 @@ class RectangleLight extends Light {
 	static var SRC = {
 		@param var lightDir : Vec3;
 		@param var lightPos : Vec3;
-		@param var p0 : Vec3;
-		@param var p1 : Vec3;
-		@param var p2 : Vec3;
-		@param var p3 : Vec3;
-		@param var width : Float;
-		@param var height : Float;
+		@param var right : Vec3;
+		@param var up : Vec3;
+		@param var halfSize : Vec2;
 		@param var horizontalAngle : Float;
 		@param var verticalAngle : Float;
 		@param var verticalFallOff : Float;
@@ -209,85 +256,13 @@ class RectangleLight extends Light {
 		var view : Vec3;
 		var normal : Vec3;
 
-		function getIntersectionPoint(rayOrigin : Vec3, rayDirection : Vec3, p0 : Vec3, p1 : Vec3, p2 : Vec3) : Vec3 {
-			var planeNormal = cross(p1 - p0, p2 - p1).normalize();
-			return tracePlane(rayOrigin, rayDirection, p0, planeNormal);
-		}
-
-		function closestPointOnSegment( a : Vec3, b : Vec3, c : Vec3) : Vec3 {
-			var ab = b - a;
-			var t = dot(c - a, ab) / dot(ab, ab);
-			return a + saturate(t) * ab;
-		}
-
-		function tracePlane(rayOrigin : Vec3, rayDirection : Vec3, planeOrigin : Vec3, planeNormal : Vec3) : Vec3 {
-			var distanceToPlane = dot(planeNormal, (planeOrigin - rayOrigin) / dot(planeNormal, rayDirection));
-			return rayOrigin + rayDirection * distanceToPlane;
-		}
-
-		function traceTriangle(rayOrigin : Vec3, rayDirection : Vec3, p0 : Vec3, p1 : Vec3, p2 : Vec3) : Bool {
-			var p = getIntersectionPoint(rayOrigin, rayDirection, p0, p1, p2);
-			var n1 = cross(p1 - p0, p - p1).normalize();
-			var n2 = cross(p2 - p1, p - p2).normalize();
-			var n3 = cross(p0 - p2, p - p0).normalize();
-			var d0 = dot(n1, n2);
-			var d1 = dot(n2, n3);
-			return (d0 > 0.1) && (d1 > 0.1);
-		}
-
-		function getClosestPointOnRectangle(rayOrigin : Vec3, rayDirection : Vec3, p0 : Vec3, p1 : Vec3, p2 : Vec3, p3 : Vec3) : Vec3 {
-			var int = getIntersectionPoint(rayOrigin, rayDirection, p0, p1, p3);
-			var closestPoint = vec3(0, 0, 0);
-			if (traceTriangle(rayOrigin, rayDirection, p0, p3, p2)) {
-				closestPoint = getIntersectionPoint(rayOrigin, rayDirection, p0, p3, p2);
-			}
-			else if (traceTriangle(rayOrigin, rayDirection, p0, p1, p3)) {
-				closestPoint = getIntersectionPoint(rayOrigin, rayDirection, p0, p1, p3);
-			}
-			else {
-				var p = int - lightPos;
-				var right = (p1 - p0).normalize();
-				var up = (p2 - p0).normalize();
-				var intRight = clamp(dot(p, right), -width * 0.5, width * 0.5) * right;
-				var intUp = clamp(dot(p, up), -height * 0.5, height * 0.5) * up;
-				closestPoint = lightPos + intRight + intUp;
-			}
-
-			return closestPoint;
-		}
-
 		function fragment() {
+			var angles = vec4(horizontalAngle, horizontalFallOff, verticalAngle, verticalFallOff);
+			var light = rectangleLightDiffuse(lightPos, lightDir, right, up, halfSize, angles, range, invLightRange4, transformedPosition, inverseSquareFalloff);
+			pbrLightDirection = light.xyz;
+			pbrLightColor = light.w * lightColor;
+			pbrSpecularLightDirection = rectangleLightSpecularDir(lightPos, lightDir, right, up, halfSize, transformedPosition, reflect(-view, normal));
 			pbrOcclusionFactor = occlusionFactor;
-
-			var right = (p1 - p0).normalize();
-			var up = (p2 - p0).normalize();
-			var invLightDir = -lightDir;
-
-			// Diffuse
-			var closestPointDiffuse = getClosestPointOnRectangle(transformedPosition, normal, p0, p1, p2, p3);
-			var delta = closestPointDiffuse - transformedPosition;
-			pbrLightDirection = normalize(delta);
-
-			var xyEpsilon = horizontalFallOff - horizontalAngle;
-			var xyLightDir = invLightDir - dot(invLightDir, up) * up;
-			var xyDelta = delta - dot(delta, up) * up;
-			var xyTheta = dot(xyDelta.normalize(), xyLightDir.normalize());
-			var horizontalFalloff = saturate((xyTheta - horizontalAngle) / xyEpsilon);
-
-			var xzEpsilon = verticalFallOff - verticalAngle;
-			var xzLightDir = invLightDir - dot(invLightDir, right) * right;
-			var xzDelta = delta - dot(delta, right) * right;
-			var xzTheta = dot(xzDelta.normalize(), xzLightDir.normalize());
-			var verticalFalloff = saturate((xzTheta - verticalAngle) / xzEpsilon);
-
-			var falloff = verticalFalloff * horizontalFalloff * pointLightIntensity(delta, range, invLightRange4);
-			pbrLightColor = falloff * lightColor;
-
-			// Specular
-			var r = reflect(-view, normal);
-			var closestPointSpec = getClosestPointOnRectangle(transformedPosition, r, p0, p1, p2, p3);
-			var delta = normalize(closestPointSpec - transformedPosition);
-			pbrSpecularLightDirection = delta;
 		}
 	}
 }

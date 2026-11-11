@@ -3,13 +3,6 @@ package h3d.pass;
 @ignore("shader")
 class Blur extends ScreenFx<h3d.shader.Blur> {
 
-	var cubeDir = [ h3d.Matrix.L([0,0,-1,0, 0,-1,0,0, 1,0,0,0]),
-					h3d.Matrix.L([0,0,1,0, 0,-1,0,0, -1,0,0,0]),
-	 				h3d.Matrix.L([1,0,0,0, 0,0,1,0, 0,1,0,0]),
-	 				h3d.Matrix.L([1,0,0,0, 0,0,-1,0, 0,-1,0,0]),
-				 	h3d.Matrix.L([1,0,0,0, 0,-1,0,0, 0,0,1,0]),
-				 	h3d.Matrix.L([-1,0,0,0, 0,-1,0,0, 0,0,-1,0]) ];
-
 	/**
 		How far in pixels the blur will go.
 	**/
@@ -125,10 +118,10 @@ class Blur extends ScreenFx<h3d.shader.Blur> {
 		return radius <= 0 ? 0 : values.length * 2 - 1;
 	}
 
-	public function apply( ctx : h3d.impl.RenderContext, src : h3d.mat.Texture, ?output : h3d.mat.Texture ) {
+	public function apply( ctx : h3d.impl.RenderContext, src : h3d.mat.Texture, ?output : h3d.mat.Texture, layer = 0 ) {
 
 		if( radius <= 0 && shader.fixedColor == null ) {
-			if( output != null ) Copy.run(src, output);
+			if( output != null ) Copy.run(src, output, null, null, layer);
 			return;
 		}
 
@@ -155,7 +148,7 @@ class Blur extends ScreenFx<h3d.shader.Blur> {
 		shader.pixel.set(1 / src.width, 0);
 		for(i in 0 ... faceCount){
 			engine.pushTarget(tmp, i);
-			if( isCube ) shader.cubeDir = cubeDir[i];
+			if( isCube ) shader.cubeDir = h3d.mat.Texture.getCubeFaceMatrix(i);
 			render();
 			engine.popTarget();
 		}
@@ -170,8 +163,8 @@ class Blur extends ScreenFx<h3d.shader.Blur> {
 		pass.setBlendMode(additive ? Add : None);
 		pass.depth(false, Always);
 		for( i in 0 ... faceCount ){
-			engine.pushTarget(output, i);
-			if( isCube ) shader.cubeDir = cubeDir[i];
+			engine.pushTarget(output, isCube ? i : layer);
+			if( isCube ) shader.cubeDir = h3d.mat.Texture.getCubeFaceMatrix(i);
 			render();
 			engine.popTarget();
 		}

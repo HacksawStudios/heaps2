@@ -103,6 +103,16 @@ class SmoothTarget extends Animation {
 		return cast objects;
 	}
 
+	override function clone( ?a : Animation ) : Animation {
+		if( a == null )
+			a = new SmoothTarget(target, duration);
+		super.clone(a);
+		var sa = Std.downcast(a, SmoothTarget);
+		sa.blend = blend;
+		sa.ignoreTranslate = ignoreTranslate;
+		sa.easing = easing;
+		return a;
+	}
 
 	var q1 : Quat = new h3d.Quat();
 	var qout : Quat = new h3d.Quat();
@@ -176,7 +186,10 @@ class SmoothTarget extends Animation {
 					mout.tz = lerp(o.tz, m.tz, blend);
 				}
 
-				@:privateAccess if( o.targetSkin != null ) o.targetSkin.jointsData[o.targetJoint].currentRelPos = mout else o.targetObject.defaultTransform = mout;
+				@:privateAccess if( o.targetSkin != null ) {
+					o.targetSkin.jointsData[o.targetJoint].currentRelPos = mout;
+					o.targetSkin.jointsUpdated = true;
+				} else o.targetObject.defaultTransform = mout;
 			}
 		}
 	}

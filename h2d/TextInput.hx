@@ -62,6 +62,7 @@ class TextInput extends Text {
 	public var useSoftwareKeyboard : Bool = true;
 	public static dynamic function showSoftwareKeyboard(target:TextInput) {}
 	public static dynamic function hideSoftwareKeyboard(target:TextInput) {}
+	public dynamic function onSoftwareKeyboardEnd(isSubmit: Bool) {}
 
 	var interactive : h2d.Interactive;
 	var cursorText : String;
@@ -71,8 +72,6 @@ class TextInput extends Text {
 	var cursorBlink = 0.;
 	var constraintHeight = -1.;
 	var scrollX = 0.;
-	var selectionPos : Float;
-	var selectionSize : Float;
 	var undo : Array<TextHistoryElement> = [];
 	var redo : Array<TextHistoryElement> = [];
 	var lastChange = 0.;
@@ -88,10 +87,14 @@ class TextInput extends Text {
 	**/
 	public function new(font, ?parent) {
 		super(font, parent);
+		trimTrailingSpaces = false;
+		wordBreak = true;
 		interactive = new h2d.Interactive(0, 0);
 		interactive.cursor = TextInput;
 		interactive.onPush = function(e:hxd.Event) {
 			onPush(e);
+			if (!canEdit)
+				return;
 			if( !e.cancel && e.button == 0 ) {
 				if( !interactive.hasFocus() ) {
 					e.kind = EFocus;
@@ -121,7 +124,6 @@ class TextInput extends Text {
 						selectionRange = { start : index, length : startIndex - index };
 					else
 						selectionRange = { start : startIndex, length : index - startIndex };
-					selectionSize = 0;
 					cursorIndex = index;
 					onCursorChange();
 					if( e.kind == ERelease || getScene() != scene )
@@ -155,7 +157,6 @@ class TextInput extends Text {
 			if( t - lastClick < 0.3 && getTextLength() != 0 ) {
 				var start = getWordStart();
 				selectionRange = { start : getWordStart(), length : getWordEnd() - start };
-				selectionSize = 0;
 				cursorIndex = selectionRange.start + selectionRange.length;
 			}
 			lastClick = t;
@@ -239,7 +240,7 @@ class TextInput extends Text {
 				beforeChange();
 				if( selectionRange == null )
 					selectionRange = { start : cursorIndex, length : K.isDown(K.CTRL) ? getWordEnd() - cursorIndex : 1 };
-				cutSelection();
+				cutSelection(false);
 				onChange();
 			}
 		case K.BACKSPACE:
@@ -249,7 +250,7 @@ class TextInput extends Text {
 					var newIndex = K.isDown(K.CTRL) ? getWordStart() : cursorIndex - 1;
 					selectionRange = { start : newIndex , length : cursorIndex - newIndex };
 				}
-				cutSelection();
+				cutSelection(true);
 				onChange();
 			}
 		case K.ESCAPE:
@@ -260,6 +261,7 @@ class TextInput extends Text {
 			if(!multiline) {
 				cursorIndex = -1;
 				interactive.blur();
+				if( canEdit ) onSubmit();
 				return;
 			} else if( canEdit ) {
 				inputText("\n");
@@ -282,7 +284,6 @@ class TextInput extends Text {
 			if (text != "") {
 				cursorIndex = getTextLength();
 				selectionRange = {start: 0, length: cursorIndex};
-				selectionSize = 0;
 				onCursorChange();
 			}
 			return;
@@ -335,7 +336,6 @@ class TextInput extends Text {
 				selectionRange.start += selectionRange.length;
 				selectionRange.length = -selectionRange.length;
 			}
-			selectionSize = 0;
 			onCursorChange();
 
 		} else if( oldText != text || cursorIndex != oldIndex )
@@ -354,10 +354,9 @@ class TextInput extends Text {
 		var pos = 0;
 		for( line in lines ) {
 			for( p in splitRawText(line).split("\n") ) {
-				if( cursor < p.length )
+				if( cursor <= p.length )
 					return pos + cursor;
 				pos += p.length;
-				if( font.charset.isSpace(StringTools.fastCodeAt(text,pos)) ) pos++;
 				cursor -= p.length + 1;
 			}
 			pos++;
@@ -374,10 +373,9 @@ class TextInput extends Text {
 		var spos = 0;
 		for( line in lines ) {
 			for( p in splitRawText(line).split("\n") ) {
-				if( (pos - spos) < p.length )
+				if( (pos - spos) <= p.length )
 					return (pos - spos) + cursor;
 				spos += p.length;
-				if( font.charset.isSpace(StringTools.fastCodeAt(text,spos)) ) spos++;
 				cursor += p.length + 1;
 			}
 			spos++;
@@ -406,15 +404,20 @@ class TextInput extends Text {
 			cutSelection();
 		var pos = getTextPos(cursorIndex);
 		text = text.substr(0, pos) + t + text.substr(pos);
-		cursorIndex += t.length;
+		pos += t.length;
+		cursorIndex = getCursorPos(pos);
 		onChange();
 	}
 
-	function cutSelection() {
+	function cutSelection( ?back ) {
 		if(selectionRange == null) return false;
-		cursorIndex = selectionRange.start;
-		var end = cursorIndex + selectionRange.length;
-		text = text.substr(0, getTextPos(cursorIndex)) + text.substr(getTextPos(end));
+		var pos = getTextPos(selectionRange.start);
+		var end = getTextPos(selectionRange.start + selectionRange.length);
+		if( pos == end && back != null ) {
+			if( back ) pos-- else end++;
+		}
+		text = text.substr(0, pos) + text.substr(end);
+		cursorIndex = getCursorPos(pos);
 		selectionRange = null;
 		return true;
 	}
@@ -778,7 +781,7 @@ class TextInput extends Text {
 
 				var selEnd = line.length;
 
-				if(selectionRange.start > lineOffset + line.length || selectionRange.start + selectionRange.length < lineOffset) {
+				if(selectionRange.start >= lineOffset + line.length || selectionRange.start + selectionRange.length < lineOffset) {
 					lineOffset += line.length;
 					continue;
 				}
@@ -786,9 +789,9 @@ class TextInput extends Text {
 				var selStart = Math.floor(Math.max(0, selectionRange.start - lineOffset));
 				var selEnd = Math.floor(Math.min(line.length - selStart, selectionRange.length + selectionRange.start - lineOffset - selStart));
 
-				selectionPos = calcTextWidth(line.substr(0, selStart));
-				selectionSize = calcTextWidth(line.substr(selStart, selEnd));
-				if( selectionRange.start + selectionRange.length == cursorIndex ) selectionSize += cursorTile.width; // last pixel
+				var selectionPos = calcTextWidth(line.substr(0, selStart));
+				var selectionSize = calcTextWidth(line.substr(selStart, selEnd));
+				if( selectionRange.start + selectionRange.length == cursorIndex || selectionSize == 0 ) selectionSize += cursorTile.width; // last pixel
 
 				selectionTile.dx += selectionPos;
 				selectionTile.dy += i * font.lineHeight;
@@ -823,11 +826,11 @@ class TextInput extends Text {
 	/**
 		Sets focus on this `TextInput`.
 	**/
-	public function focus() {
+	public function focus( autoSelect=false ) {
 		interactive.focus();
 		if( cursorIndex < 0 ) {
 			cursorIndex = 0;
-			if( text != "" && !multiline ) selectionRange = { start : 0, length : getTextLength() };
+			if( autoSelect && text != "" && !multiline ) selectionRange = { start : 0, length : getTextLength() };
 		}
 	}
 
@@ -850,6 +853,12 @@ class TextInput extends Text {
 	**/
 	public function hasFocus() {
 		return interactive.hasFocus();
+	}
+
+	/**
+		Triggered when a not multiline text input is validated with Enter
+	**/
+	public dynamic function onSubmit() {
 	}
 
 	/**

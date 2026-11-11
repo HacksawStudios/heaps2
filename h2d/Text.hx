@@ -123,9 +123,15 @@ class Text extends Drawable {
 		Tag for indicating highlighted text.
 	**/
 	public var highlightTag : String = "";
+	/**
+		When `lineBreak` is enabled, allow breaking inside a word if it does not fit on a single line.
+		Without it, a word longer than `maxWidth` overflows the text bounds.
+	**/
+	public var wordBreak(default,set) : Bool = false;
 
 	var glyphs : TileGroup;
 	var needsRebuild : Bool;
+	var trimTrailingSpaces : Bool = true;
 	var currentText : String;
 	var textChanged : Bool;
 
@@ -148,14 +154,24 @@ class Text extends Drawable {
 	**/
 	public function new( font : Font, ?parent : h2d.Object ) {
 		super(parent);
-		this.font = font;
+		this.font = resolveFont(font);
 		textAlign = Left;
 		text = "";
 		currentText = "";
 		textColor = 0xFFFFFF;
 	}
 
-	function set_font(font) {
+	function resolveFont(font:Font) {
+		while( true ) {
+			if( font == null || font.type != FontGroup ) return font;
+			var sub = resolveSubFont(font, this);
+			if( font == sub ) throw "Recursive font";
+			font = sub;
+		}
+	}
+
+	function set_font(font:Font) {
+		font = resolveFont(font);
 		if( this.font == font ) return font;
 		this.font = font;
 		if ( font != null ) {
@@ -176,6 +192,8 @@ class Text extends Drawable {
 					sdfShader.smoothing = smoothing;
 					sdfShader.channel = channel;
 					sdfShader.autoSmoothing = smoothing == -1;
+				case FontGroup:
+					throw "assert";
 			}
 		}
 		if( glyphs != null ) glyphs.remove();
@@ -216,6 +234,13 @@ class Text extends Drawable {
 	function set_wordWrap(b) {
 		if( wordWrap == b ) return b;
 		wordWrap = b;
+		rebuild();
+		return b;
+	}
+
+	function set_wordBreak(b) {
+		if( wordBreak == b ) return b;
+		wordBreak = b;
 		rebuild();
 		return b;
 	}
@@ -617,6 +642,10 @@ class Text extends Drawable {
 			h = calcHeight;
 		}
 		addBounds(relativeTo, out, x, y, w, h);
+	}
+
+	public static dynamic function resolveSubFont( fnt : Font, text : Text ) : Font {
+		return fnt.subFonts[0];
 	}
 
 }

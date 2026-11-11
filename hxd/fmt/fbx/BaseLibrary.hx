@@ -17,6 +17,7 @@ class TmpObject {
 	#end
 	public var joint : h3d.anim.Skin.Joint;
 	public var skin : TmpObject;
+	public var rootJoints : Array<TmpObject>;
 	public function new() {
 		childs = [];
 	}
@@ -60,6 +61,12 @@ class DefaultMatrixes {
 		m._21 = -m._21;
 		m._31 = -m._31;
 		m._41 = -m._41;
+	}
+
+	public function fromMatrix(m : h3d.Matrix) {
+		trans = m.getPosition();
+		scale = m.getScale();
+		rotate = m.getEulerAngles();
 	}
 
 	public function toMatrix(leftHand) {
@@ -147,6 +154,11 @@ class BaseLibrary {
 		Use the legacy system to convert scale and axis of FBX file
 	**/
 	public var legacyScaleAxisConversion : Bool = false;
+
+	/**
+		Use the legacy system to import skinned mesh of FBX file
+	**/
+	public var legacySkinImport : Bool = false;
 
 	public function new( fileName ) {
 		this.fileName = fileName;
@@ -244,9 +256,11 @@ class BaseLibrary {
 							}
 
 							animationEvents = [];
-							for (f => e in animationCurve.get("KeyValueFloat").getFloats()) {
-								if (e == 0) continue;
-								animationEvents.push({ { frame: f, data: enumValues[Std.int(e)] } });
+							if (animationCurve != null) {
+								for (f => e in animationCurve.get("KeyValueFloat").getFloats()) {
+									if (e == 0) continue;
+									animationEvents.push({ { frame: f, data: enumValues[Std.int(e)] } });
+								}
 							}
 						default:
 					}
@@ -437,12 +451,12 @@ class BaseLibrary {
 	}
 
 	function updateModelScale() {
-		var unitScaleFactor = 1;
-		var originalUnitScaleFactor = 1;
+		var unitScaleFactor = 1.;
+		var originalUnitScaleFactor = 1.;
 		for( p in root.getAll("GlobalSettings.Properties70.P") ) {
 			switch( p.props[0].toString() ) {
-				case "UnitScaleFactor": unitScaleFactor = p.props[4].toInt();
-				case "OriginalUnitScaleFactor": originalUnitScaleFactor = p.props[4].toInt();
+				case "UnitScaleFactor": unitScaleFactor = p.props[4].toFloat();
+				case "OriginalUnitScaleFactor": originalUnitScaleFactor = p.props[4].toFloat();
 				default:
 			}
 		}
@@ -452,37 +466,46 @@ class BaseLibrary {
 		if (factor == 1) return;
 
 		// Scale on geometry
-		if (factor != 1) {
-			for( g in this.root.getAll("Objects.Geometry.Vertices").concat(this.root.getAll("Objects.Geometry.Shape.Vertices")) ) {
-				var v = toFloats(g);
-				for( i in 0...v.length )
-					v[i] = v[i] * factor;
+		for( g in this.root.getAll("Objects.Geometry.Vertices").concat(this.root.getAll("Objects.Geometry.Shape.Vertices")) ) {
+			var v = toFloats(g);
+			for( i in 0...v.length )
+				v[i] = v[i] * factor;
+		}
+
+		// Scale translation
+		for (m in getAllModels()) {
+			for (p in m.getAll("Properties70.P")) {
+				if (p.props[0].toString() == "Lcl Translation" || p.props[0].toString() == "GeometricTranslation") {
+					for (idx in [4,5,6]) {
+						var v = p.props[idx].toFloat();
+						p.props[idx] = PFloat(v * factor);
+					}
+				}
 			}
 		}
 
-		// Scale on animation
+		// Scale on skin : the bind matrices of the deformers are in the same unit as the geometry
+		for( t in this.root.getAll("Objects.Deformer.Transform") ) {
+			var m = toFloats(t);
+			m[12] *= factor;
+			m[13] *= factor;
+			m[14] *= factor;
+		}
+
+		// Scale on animation : the translations as the Lcl Translation of every model above (the scale is unchanged)
 		for (n in this.root.getAll("Objects.AnimationCurveNode")) {
-			var name = n.getName();
-			var model = getParent(n,"Model",true);
-			var isRoot = model != null && getParent(model,"Model",true) == null;
+			if (n.getName() != "T")
+				continue;
 			for (p in n.getAll("Properties70.P")) {
 				switch( p.props[0].toString() ) {
-					case "d|X", "d|Y", "d|Z" if( name == "T" && !isRoot ): p.props[4] = PFloat(p.props[4].toFloat() / factor);
-					case "d|X", "d|Y", "d|Z" if( name == "S" && isRoot ): p.props[4] = PFloat(p.props[4].toFloat() * factor);
+					case "d|X", "d|Y", "d|Z": p.props[4] = PFloat(p.props[4].toFloat() * factor);
 					default:
 				}
 			}
 			for (c in getChilds(n,"AnimationCurve")) {
 				var vl = toFloats(c.get("KeyValueFloat"));
-				switch (name) {
-					case "T" if( !isRoot ):
-						for( i in 0...vl.length )
-							vl[i] = vl[i] / factor;
-					case "S" if( isRoot ):
-						for( i in 0...vl.length )
-							vl[i] = vl[i] * factor;
-					default:
-				}
+				for( i in 0...vl.length )
+					vl[i] = vl[i] * factor;
 			}
 		}
 	}
@@ -1375,6 +1398,11 @@ class BaseLibrary {
 					fov[f] = c.fov.v[fovp - 1];
 				}
 			}
+
+			var objectName = c.object;
+			var reg = ~/_*-*LOD0/;
+			objectName = reg.replace(objectName, '');
+
 			if( frames != null ) {
 				var hasTrans = c.t != null;
 				var hasRot = c.r != null || def.rotate != null || def.preRot != null;
@@ -1382,16 +1410,16 @@ class BaseLibrary {
 				// force position for objects unless it's default to skin
 				if( !hasTrans && def.transPos == null )
 					hasTrans = true;
-				anim.addCurve(c.object, frames, hasTrans, hasRot, hasScale);
+				anim.addCurve(objectName, frames, hasTrans, hasRot, hasScale);
 			}
 			if( alpha != null )
-				anim.addAlphaCurve(c.object, alpha);
+				anim.addAlphaCurve(objectName, alpha);
 			if( uvs != null )
-				anim.addUVCurve(c.object, uvs);
+				anim.addUVCurve(objectName, uvs);
 			if( roll != null )
-				anim.addPropCurve(c.object, "Roll", roll);
+				anim.addPropCurve(objectName, "Roll", roll);
 			if( fov != null )
-				anim.addPropCurve(c.object, "FOVY", fov);
+				anim.addPropCurve(objectName, "FOVY", fov);
 		}
 		return anim;
 	}

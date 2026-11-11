@@ -22,7 +22,6 @@ typedef TextureStat = {
 
 class MemoryManager {
 
-	static inline var MAX_MEMORY = 6144 * (1024. * 1024.); // MB
 	static inline var SIZE = 65532;
 	static var ALL_FLAGS = Type.allEnums(Buffer.BufferFlag);
 
@@ -35,10 +34,19 @@ class MemoryManager {
 	var quadIndexes16 : Indexes;
 	var triIndexes32 : Indexes;
 	var quadIndexes32 : Indexes;
-	public var usedMemory(default, null) : Float = 0;
+	public var bufferMemory(default, null) : Float = 0;
 	public var texMemory(default, null) : Float = 0;
-	public var autoDisposeCooldown : Int = 60;
-	public var autoDisposeCleanup : Int = 3600;
+
+	/**
+	 	How much time a texture should be kept into memory if it's not used.
+	**/
+	public var autoDisposeKeepTime : Float = 3.0;
+
+	/**
+	 	The amount of free memory we want to keep on our GPU to allow swapping.
+	**/
+	public var autoDisposeGpuFreeMB : Float = 1024;
+
 	var lastAutoDispose = 0;
 
 	public function new(driver) {
@@ -104,7 +112,7 @@ class MemoryManager {
 		var nquads = ((vertices + 3) >> 2) * 6;
 		if( nquads <= SIZE )
 			return quadIndexes16;
-		if( quadIndexes32 == null || quadIndexes32.count < vertices ) {
+		if( quadIndexes32 == null || quadIndexes32.count < nquads ) {
 			var sz = 1 << 17;
 			while( sz < nquads ) sz <<= 1;
 			var bytes = haxe.io.Bytes.alloc(sz << 2);
@@ -132,19 +140,14 @@ class MemoryManager {
 		if( b.vbuf != null ) return;
 
 		var mem = b.getMemSize();
-
 		if( mem == 0 ) return;
 
-		while( usedMemory + mem > MAX_MEMORY || (b.vbuf = driver.allocBuffer(b)) == null ) {
-
+		autoDisposeMemory();
+		while( (b.vbuf = driver.allocBuffer(b)) == null ) {
 			if( driver.isDisposed() ) return;
-
-			var size = usedMemory;
-			garbage();
-			if( usedMemory == size )
-				errorOutOfMemory();
+			tryFreeMemory();
 		}
-		usedMemory += mem;
+		bufferMemory += mem;
 		buffers.push(b);
 	}
 
@@ -154,31 +157,40 @@ class MemoryManager {
 		b.vbuf = null;
 		// in case it was allocated with a previous memory manager
 		if( buffers.remove(b) )
-			usedMemory -= b.getMemSize();
+			bufferMemory -= b.getMemSize();
 	}
 
 	// ------------------------------------- TEXTURES ------------------------------------------
 
 	function memSize( t : h3d.mat.Texture ) {
-		if( t.flags.has(AsyncLoading) && t.flags.has(Loading) )
+		if( t.isPlaceholder )
 			return 4; // 1x1 pixel
-		var size = hxd.Pixels.calcDataSize(t.width,t.height,t.format);
-		if( t.mipLevels > 0 ) {
-			for( i in 1...t.mipLevels ) {
-				var w = t.width >> i; if( w == 0 ) w = 1;
-				var h = t.height >> i; if( h == 0 ) h = 1;
-				size += hxd.Pixels.calcDataSize(w,h,t.format);
-			}
+		var size = 0;
+		for( i in t.residentMip...t.mipLevels ) {
+			var w = t.width >> i; if( w == 0 ) w = 1;
+			var h = t.height >> i; if( h == 0 ) h = 1;
+			size += hxd.Pixels.calcDataSize(w,h,t.format);
 		}
 		return size * t.layerCount;
 	}
 
-	public function cleanTextures( force = true, regular = false ) {
-		textures.sort(sortByLRUPrio);
+	@:allow(h3d.mat.Texture.setResidentMip)
+	function setResidentMip( t : h3d.mat.Texture, mip : Int ) {
+		var prevSize = memSize(t);
+		if( !driver.setResidentMip(t, mip) )
+			return false;
+		texMemory += memSize(t) - prevSize;
+		return true;
+	}
+
+	public function cleanTextures( force = true ) {
+		textures.sort(sortByLRU);
+		var cleanupFrames = Math.ceil(autoDisposeKeepTime * hxd.Timer.fps());
+		if( cleanupFrames < 1 ) cleanupFrames = 1;
 		for( t in textures ) {
 			if( t.realloc == null || t.isDisposed() ) continue;
-			if( regular && t.keepPriority > 0 ) break;
-			if( (force || t.lastFrame < hxd.Timer.frameCount - autoDisposeCleanup) && t.lastFrame != h3d.mat.Texture.PREVENT_AUTO_DISPOSE ) {
+			if( t.lastFrame == h3d.mat.Texture.PREVENT_AUTO_DISPOSE ) break;
+			if( force || t.lastFrame < hxd.Timer.frameCount - cleanupFrames ) {
 				t.dispose();
 				return true;
 			}
@@ -186,9 +198,38 @@ class MemoryManager {
 		return false;
 	}
 
-	static function sortByLRUPrio( t1 : h3d.mat.Texture, t2 : h3d.mat.Texture ) {
-		var dp = t1.keepPriority - t2.keepPriority;
-		return dp != 0 ? dp : t1.lastFrame - t2.lastFrame;
+	static function sortByLRU( t1 : h3d.mat.Texture, t2 : h3d.mat.Texture ) {
+		return t1.lastFrame - t2.lastFrame;
+	}
+
+	public function beginFrame() {
+		if( autoDisposeGpuFreeMB > 0 && hxd.Timer.frameCount > lastAutoDispose + 60 ) {
+			var stats = driver.getMemoryUsage();
+			if( stats == null ) {
+				// disable (our driver doesn't support it anyway)
+				autoDisposeGpuFreeMB = -1;
+				return;
+			}
+			if( (stats.free/(1024*1024)) > autoDisposeGpuFreeMB || !cleanTextures(false) )
+				lastAutoDispose = hxd.Timer.frameCount; // wait a bit
+		}
+	}
+
+	function autoDisposeMemory() {
+		if( autoDisposeGpuFreeMB < 0 && hxd.Timer.frameCount > lastAutoDispose + 60 ) {
+			// if we have disabled per frame memory cleanup, or if our driver doesn't support it
+			// then let's do at least some cleanup for each allocation on a regular basis
+			// so we don't wait until our GPU returns null
+			cleanTextures(false);
+			lastAutoDispose = hxd.Timer.frameCount;
+		}
+	}
+
+	function tryFreeMemory() {
+		var size = bufferMemory + texMemory;
+		if( !cleanTextures(false) ) garbage();
+		if( bufferMemory + texMemory == size )
+			errorOutOfMemory();
 	}
 
 	@:allow(h3d.mat.Texture.dispose)
@@ -200,19 +241,12 @@ class MemoryManager {
 
 	@:allow(h3d.mat.Texture.alloc)
 	function allocTexture( t : h3d.mat.Texture ) {
+		autoDisposeMemory();
 		while( true ) {
-			if( autoDisposeCooldown > 0 && hxd.Timer.frameCount > lastAutoDispose + autoDisposeCooldown ) {
-				cleanTextures(false, true);
-				lastAutoDispose = hxd.Timer.frameCount;
-			}
 			t.t = t.isDepth() ? driver.allocDepthBuffer(t) : driver.allocTexture(t);
 			if( t.t != null ) break;
-
 			if( driver.isDisposed() ) return;
-			var free = false;
-			while( cleanTextures(false) ) free = true; // clean all old textures
-			if( !free && !cleanTextures(true) )
-				errorOutOfMemory();
+			tryFreeMemory();
 		}
 		textures.push(t);
 		texMemory += memSize(t);
@@ -244,22 +278,24 @@ class MemoryManager {
 			b.dispose();
 		buffers = [];
 		textures = [];
-		usedMemory = 0;
+		bufferMemory = 0;
 		texMemory = 0;
 	}
 
 	// ------------------------------------- STATS ------------------------------------------
 
-	public function stats() {
-		var total = 0.;
-		for( b in buffers )
-			total += b.getMemSize();
+	public function stats( megas = false ) {
+		var total = bufferMemory + texMemory;
+		var use = driver.getMemoryUsage();
+		inline function fmt( v : Float ) return megas ? hxd.Math.fmt(v/(1024*1024)) : v;
 		return {
 			bufferCount : buffers.length,
-			bufferMemory : total,
-			totalMemory : usedMemory + texMemory,
+			bufferMemory : fmt(bufferMemory),
+			totalMemory : fmt(use == null ? bufferMemory + texMemory : use.allocated),
 			textureCount : textures.length,
-			textureMemory : texMemory,
+			textureMemory : fmt(texMemory),
+			otherMemory : use == null ? 0 : fmt(use.allocated - total) /* remaining memory that we don't know about */,
+			maxMemory : use == null ? 0 : fmt(use.total),
 		};
 	}
 
@@ -309,7 +345,7 @@ class MemoryManager {
 				all.push(inf);
 			}
 			inf.count++;
-			var size = b.vertices * b.format.stride * 4;
+			var size = b.getMemSize();
 			inf.size += size;
 			addStack("buffer", b.allocPos, inf.stacks, size);
 		}

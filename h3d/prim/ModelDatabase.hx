@@ -24,6 +24,7 @@ class ModelDatabase {
 	public static var DEFAULT_CONFIG_ENTRY = "default";
 
 	public static var LOD_CONFIG = "lodConfig";
+	public static var CULLING_RATIO_CONFIG = "cullingRatio";
 	public static var DYN_BONES_CONFIG = "dynamicBones";
 	public static var COLLIDE_CONFIG = "collide";
 
@@ -35,10 +36,6 @@ class ModelDatabase {
 	public static var db : Map<String, Dynamic> = new Map();
 	var baseDir(get, never) : String;
 	var fileConfig : FileConfig<Dynamic>;
-
-	public static dynamic function customizeLodConfig(c : Array<Float>) {
-		return c;
-	}
 
 	function new() {
 		fileConfig = new FileConfig<ModelProps>("", FILE_NAME, defaultProps);
@@ -160,6 +157,13 @@ class ModelDatabase {
 		@:privateAccess input.hmd.lodConfig = c;
 	}
 
+	function loadCullingRatio( input : ModelDataInput, data : Dynamic ) {
+		var c = Reflect.field(data, CULLING_RATIO_CONFIG);
+		if (c == null || input.hmd == null)
+			return;
+		@:privateAccess input.hmd.cullingScreenRatio = c;
+	}
+
 	function loadDynamicBonesConfig( input : ModelDataInput, data : Dynamic ) {
 		var c : Array<Dynamic> = Reflect.field(data, DYN_BONES_CONFIG);
 		if (c == null || input.skin == null)
@@ -231,7 +235,7 @@ class ModelDatabase {
 
 		if (!isDefaultConfig) {
 			var c = [];
-			for (idx in 0...input.hmd.lodCount()) {
+			for (idx in 0...(input.hmd.lodCount() - 1)) {
 				if (idx >= input.hmd.lodConfig.length)
 					c[idx] = 0.;
 				else
@@ -241,6 +245,14 @@ class ModelDatabase {
 		}
 		else
 			Reflect.deleteField(data, LOD_CONFIG);
+	}
+
+	function saveCullingRatio( input : ModelDataInput, data : Dynamic ) {
+		var cullingRatio = input.hmd.getCullingScreenRatio();
+		if (cullingRatio == 0.)
+			Reflect.deleteField(data, CULLING_RATIO_CONFIG);
+		else
+			Reflect.setField(data, CULLING_RATIO_CONFIG, cullingRatio);
 	}
 
 	function saveDynamicBonesConfig( input : ModelDataInput, data : Dynamic ) {
@@ -300,10 +312,8 @@ class ModelDatabase {
 			Reflect.setField(data, COLLIDE_CONFIG, Reflect.field(input.collide, COLLIDE_CONFIG));
 	}
 
-
 	public function getDefaultLodConfig( dir : String ) : Array<Float> {
-		var c = fileConfig.getConfig(dir).lodConfig;
-		return customizeLodConfig(c);
+		return fileConfig.getConfig(dir).lodConfig;
 	}
 
 	public function getDefaultDynamicBonesConfig( dir : String ) : Array<Dynamic> {
@@ -318,6 +328,7 @@ class ModelDatabase {
 
 		loadLodConfig(input, data);
 		loadDynamicBonesConfig(input, data);
+		loadCullingRatio(input, data);
 	}
 
 	public function saveModelProps( input : ModelDataInput ) {
@@ -328,6 +339,7 @@ class ModelDatabase {
 		saveLodConfig(input, data);
 		saveDynamicBonesConfig(input, data);
 		saveCollideConfig(input, data);
+		saveCullingRatio(input, data);
 
 		saveModelData(input.resourceDirectory, input.resourceName, input.objectName, data);
 	}

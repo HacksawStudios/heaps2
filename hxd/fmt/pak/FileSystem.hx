@@ -31,6 +31,7 @@ class FileInput extends haxe.io.BytesInput {
 class FileSeek {
 	#if (hl && hl_ver >= version("1.12.0"))
 	@:hlNative("std","file_seek2") static function seek2( f : sys.io.File.FileHandle, pos : Float, cur : Int ) : Bool { return false; }
+	@:hlNative("std","file_tell2") static function tell2( f : sys.io.File.FileHandle ) : Float { return -1; }
 	#end
 
 	public static function seek( f : FileInput, pos : Float, mode : FileSeekMode ) {
@@ -40,6 +41,14 @@ class FileSeek {
 		#else
 		if( pos > 0x7FFFFFFF ) throw haxe.io.Error.Custom("seek out of bounds");
 		f.seek(Std.int(pos),mode);
+		#end
+	}
+
+	public static function tell( f : FileInput ) : Float {
+		#if (hl && hl_ver >= version("1.12.0"))
+		return tell2(@:privateAccess f.__f);
+		#else
+		return f.tell();
 		#end
 	}
 }
@@ -139,6 +148,7 @@ class FileSystem implements hxd.fs.FileSystem {
 	#if target.threaded
 	var threadIdentifier : sys.thread.Tls<Null<Int>>;
 	var threadIdCache : Array<Null<Int>>;
+	var threadIdMutex : sys.thread.Mutex;
 	#end
 	var files : Array<{ path : String, inputs : Array<FileInput> }>;
 	public var totalReadBytes = 0;
@@ -153,6 +163,7 @@ class FileSystem implements hxd.fs.FileSystem {
 		files = [];
 		#if target.threaded
 		threadIdCache = [];
+		threadIdMutex = new sys.thread.Mutex();
 		threadIdentifier = new sys.thread.Tls();
 		#end
 		root = new PakEntry(this, null, f, -1);
@@ -204,8 +215,10 @@ class FileSystem implements hxd.fs.FileSystem {
 	#if (target.threaded)
 		var id : Null<Int> = threadIdentifier.value;
 		if( id == null ) {
+			threadIdMutex.acquire();
 			id = threadIdCache.length;
 			threadIdCache.push(id);
+			threadIdMutex.release();
 			threadIdentifier.value = id;
 		}
 		return id;

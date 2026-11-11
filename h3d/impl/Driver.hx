@@ -4,34 +4,52 @@ package h3d.impl;
 typedef GPUBuffer = {};
 typedef Texture = {};
 typedef Query = {};
+typedef DriverImpl = Driver;
+#elseif (js && dx12)
+typedef GPUBuffer = DX12Driver.BufferData;
+typedef Texture = h3d.impl.DX12Driver.TextureData;
+typedef Query = h3d.impl.DX12Driver.QueryData;
+typedef DriverImpl = DX12Driver;
+#elseif hlvk
+typedef GPUBuffer = VulkanDriver.BufferData;
+typedef Texture = VulkanDriver.TextureData;
+typedef Query = VulkanDriver.QueryData;
+typedef DriverImpl = VulkanDriver;
 #elseif js
 typedef GPUBuffer = js.html.webgl.Buffer;
 typedef Texture = { t : js.html.webgl.Texture, width : Int, height : Int, internalFmt : Int, pixelFmt : Int, bits : Int, bind : Int #if multidriver, driver : Driver #end };
 typedef Query = {};
+typedef DriverImpl = GlDriver;
 #elseif hlsdl
 typedef GPUBuffer = sdl.GL.Buffer;
 typedef Texture = { t : sdl.GL.Texture, width : Int, height : Int, internalFmt : Int, pixelFmt : Int, bits : Int, bind : Int #if multidriver, driver : Driver #end };
 typedef Query = { q : sdl.GL.Query, kind : QueryKind };
+typedef DriverImpl = GlDriver;
 #elseif usegl
 typedef GPUBuffer = haxe.GLTypes.Buffer;
 typedef Texture = { t : haxe.GLTypes.Texture, width : Int, height : Int, internalFmt : Int, pixelFmt : Int, bits : Int, bind : Int };
 typedef Query = { q : haxe.GLTypes.Query, kind : QueryKind };
+typedef DriverImpl = GlDriver;
 #elseif (hldx && dx12)
 typedef GPUBuffer = DX12Driver.BufferData;
 typedef Texture = h3d.impl.DX12Driver.TextureData;
 typedef Query = h3d.impl.DX12Driver.QueryData;
+typedef DriverImpl = DX12Driver;
 #elseif hldx
 typedef GPUBuffer = dx.Resource;
 typedef Texture = { res : dx.Resource, view : dx.Driver.ShaderResourceView, ?depthView : dx.Driver.DepthStencilView, ?readOnlyDepthView : dx.Driver.DepthStencilView, rt : Array<dx.Driver.RenderTargetView>, ?views : Array<dx.Driver.ShaderResourceView> };
 typedef Query = {};
+typedef DriverImpl = Driver;
 #elseif usesys
 typedef GPUBuffer = haxe.GraphicsDriver.GPUBuffer;
 typedef Texture = haxe.GraphicsDriver.Texture;
 typedef Query = haxe.GraphicsDriver.Query;
+typedef DriverImpl = Driver;
 #else
 typedef GPUBuffer = {};
 typedef Texture = {};
 typedef Query = {};
+typedef DriverImpl = Driver;
 #end
 
 enum Feature {
@@ -85,6 +103,26 @@ enum Feature {
 		Supports bindless
 	*/
 	Bindless;
+	/*
+		Can render into a single layer of a depth texture array.
+	*/
+	DepthTextureArray;
+	/*
+		Supports compute shaders and read/write storage buffers.
+	*/
+	ComputeShaders;
+	/*
+		Sampler arrays can be indexed by a non-constant, dynamically uniform expression.
+	*/
+	DynamicSamplerIndex;
+	/*
+		Supports depth clamping instead of clipping against the near and far planes.
+	*/
+	DepthClamp;
+	/*
+		Textures can allocate only their less detailed mip levels (see Texture.setResidentMip).
+	*/
+	ResidentMips;
 }
 
 enum QueryKind {
@@ -114,6 +152,8 @@ class Driver {
 	static var SHADER_CACHE : h3d.impl.ShaderCache;
 	var shaderCache = SHADER_CACHE;
 
+	public var upscaling(default, null) = new h3d.impl.Upscaling(null, []);
+
 	public static function setShaderCache( cache : h3d.impl.ShaderCache ) {
 		SHADER_CACHE = cache;
 	}
@@ -122,6 +162,20 @@ class Driver {
 
 
 	public function hasFeature( f : Feature ) {
+		return false;
+	}
+
+	public static var requestedFeatures(default, null) = new haxe.EnumFlags<Feature>();
+	public static function requestFeature( f : Feature ) : Bool {
+		if( h3d.Engine.getCurrent() != null )
+			throw "Driver.requestFeature(" + f + ") must be called before the engine is created";
+		var accepted = DriverImpl.onFeatureRequested(f);
+		if( accepted )
+			requestedFeatures.set(f);
+		return accepted;
+	}
+
+	static function onFeatureRequested( f : Feature ) : Bool {
 		return false;
 	}
 
@@ -137,6 +191,9 @@ class Driver {
 	}
 
 	public function dispose() {
+	}
+
+	public function removeEngine( engine : h3d.Engine ) {
 	}
 
 	public function begin( frame : Int ) {
@@ -156,10 +213,17 @@ class Driver {
 		return null;
 	}
 
+	public function warmupShader( shader : hxsl.RuntimeShader ) {
+	}
+
 	function logImpl( str : String ) {
 	}
 
 	public function clear( ?color : h3d.Vector4, ?depth : Float, ?stencil : Int ) {
+	}
+
+	public function getMemoryUsage() : Null<{ total : Float, allocated : Float, free : Float }>  {
+		return null;
 	}
 
 	public function captureRenderBuffer( pixels : hxd.Pixels ) {
@@ -190,6 +254,10 @@ class Driver {
 	public function selectTextureHandles( handles : Array<h3d.mat.TextureHandle> ) {
 	}
 
+	public function selectBufferHandles( handles : Array<h3d.BufferHandle> ) {
+	}
+
+
 	public function uploadShaderBuffers( buffers : h3d.shader.Buffers, which : h3d.shader.Buffers.BufferKind ) {
 	}
 
@@ -217,7 +285,9 @@ class Driver {
 	public function setRenderTargets( textures : Array<h3d.mat.Texture>, depthBinding : h3d.Engine.DepthBinding = ReadWrite ) {
 	}
 
-	public function setDepth( tex : Null<h3d.mat.Texture> ) {
+	public function setDepth( tex : Null<h3d.mat.Texture>, layer = 0 ) {
+		if( layer != 0 )
+			throw "Not implemented";
 	}
 
 	public function setDepthClamp( enabled : Bool ) {
@@ -228,9 +298,6 @@ class Driver {
 
 	public function allocDepthBuffer( b : h3d.mat.Texture ) : Texture {
 		return null;
-	}
-
-	public function disposeDepthBuffer( b : h3d.mat.Texture ) {
 	}
 
 	public function getDefaultDepthBuffer() : h3d.mat.Texture {
@@ -287,10 +354,22 @@ class Driver {
 	public function readBufferBytes( b : Buffer, startVertex : Int, vertexCount : Int, buf : haxe.io.Bytes, bufPos : Int ) {
 	}
 
+	public function readBufferBytesAsync( b : Buffer, startVertex : Int, vertexCount : Int, buf : haxe.io.Bytes, bufPos : Int, callback : Void -> Void ) {
+	}
+
 	/**
 		Returns true if we could copy the texture, false otherwise (not supported by driver or mismatch in size/format)
 	**/
 	public function copyTexture( from : h3d.mat.Texture, to : h3d.mat.Texture ) {
+		return false;
+	}
+
+	/**
+		Reallocates the allocated texture so its most detailed mip level is `mip`, keeping the content
+		of the mip levels common to both allocations. Returns false if not supported or out of memory,
+		in which case the texture is unchanged. Requires the ResidentMips feature.
+	**/
+	public function setResidentMip( t : h3d.mat.Texture, mip : Int ) : Bool {
 		return false;
 	}
 
@@ -337,11 +416,15 @@ class Driver {
 
 	// --- Bindless
 
-	public function enableBindless() {
+	public function getTextureHandle( t : h3d.mat.Texture ) : h3d.mat.TextureHandle {
 		throw "Bindless is not implemented on this platform";
 	}
 
-	public function getTextureHandle( t : h3d.mat.Texture ) : h3d.mat.TextureHandle {
+	public function getBufferHandle( b : h3d.Buffer ) : h3d.BufferHandle {
 		throw "Bindless is not implemented on this platform";
+	}
+
+	public function copyBackBuffer( to : h3d.mat.Texture ) : Bool {
+		return false;
 	}
 }

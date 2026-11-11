@@ -2,6 +2,8 @@ package hxsl;
 
 #if (sys || nodejs)
 
+private typedef DumpNode = { name : String, count: Int, children : Array<DumpNode> };
+
 @:structInit
 private class ShaderListInfo {
 	public var name : String;
@@ -83,27 +85,54 @@ class CacheFile2Loader {
 		}
 
 		#if heaps_mt_hxsl_cache
-		workThread = sys.thread.Thread.create(threadLoop, (e) -> { linkDone = true; });
+		workThread = sys.thread.Thread.create(function() {
+			try {
+				threadLoop();
+			} catch( e ) {
+				Sys.println("[CacheFile2] Preload aborted: " + e.toString());
+				bcListsReady = true;
+				linkDone = true;
+				rtMapReady = true;
+			}
+		});
 		workThread.name = "CacheFile2Loader";
 		event = haxe.MainLoop.add(update);
 		#else
+		cache.preloading = true;
 		threadLoop();
+		cache.preloading = false;
 		if( this.onDone != null )
 			this.onDone();
 		#end
 	}
 
 	function threadLoop() {
+		var driver = h3d.Engine.getCurrent()?.driver;
+		var linked = 0;
+		var total = rtInfosDefault.length + rtInfosBatch.length + rtInfosCompute.length;
+		function link( sl : ShaderList, mode : RuntimeShader.LinkMode ) {
+			if( CacheFile2.onPreloadProgress != null )
+				CacheFile2.onPreloadProgress(++linked, total);
+			var rts = try cache.link(sl, mode) catch( e ) {
+				Sys.println("[CacheFile2] Failed to link " + [for( s in sl ) @:privateAccess s.shader.data.name].join(":") + ": " + e.toString());
+				return null;
+			}
+			try driver?.warmupShader(rts) catch( e ) {
+				Sys.println("[CacheFile2] Failed to compile " + [for( s in sl ) @:privateAccess s.shader.data.name].join(":") + ": " + e.toString());
+			}
+			return rts;
+		}
+
 		// Link ShaderList Default
 		for( l in slistsDefault ) {
-			var rts = cache.link(l.sl, Default);
-			rtMap.set(l.sign, { rt : rts, sl : l.sl });
+			var rts = link(l.sl, Default);
+			if( rts != null )
+				rtMap.set(l.sign, { rt : rts, sl : l.sl });
 		}
 
 		// Link ShaderList Compute
-		for( sl in slistsCompute ) {
-			var rts = cache.link(sl, Compute);
-		}
+		for( sl in slistsCompute )
+			link(sl, Compute);
 
 		#if heaps_mt_hxsl_cache
 		rtMapReady = true;
@@ -115,9 +144,8 @@ class CacheFile2Loader {
 		#end
 
 		// Link ShaderList Batch
-		for( sl in slistsBatch ) {
-			var rts = cache.link(sl, Batch);
-		}
+		for( sl in slistsBatch )
+			link(sl, Batch);
 
 		#if heaps_mt_hxsl_cache
 		linkDone = true;
@@ -170,7 +198,11 @@ class CacheFile2Loader {
 						sl = null;
 						break;
 					}
-					var b = cache.makeBatchShader(rts.rt, rts.sl.next, bcinfo.params);
+					var b = try cache.makeBatchShader(rts.rt, rts.sl.next, bcinfo.params) catch( e ) {
+						Sys.println('[CacheFile2] Can\'t make batch shader $name: ' + e.toString());
+						sl = null;
+						break;
+					}
 					ssd = @:privateAccess b.shader;
 				}
 			}
@@ -251,13 +283,19 @@ class CacheFile2Loader {
 class CacheFile2 extends Cache {
 	static var DEBUG : Bool = false;
 	static var LOAD_TIME : Float = 0.0;
+	public static var VERSION = 1;
+	public static var onPreloadProgress : (linked : Int, total : Int) -> Void;
 
 	var file : String;
 	var outFile : String;
-	var allowSave : Bool;
+	public var allowSave : Bool;
 
 	var isLoading : Bool = false;
 	var isDirty(default, set) : Bool = false;
+	var compiledWhileLoading : Bool = false;
+	#if !heaps_mt_hxsl_cache
+	var preloading : Bool = false;
+	#end
 	var runtimesDefault : Array<RuntimeShader> = [];
 	var runtimesBatch : Array<RuntimeShader> = [];
 	var runtimesCompute : Array<RuntimeShader> = [];
@@ -306,14 +344,20 @@ class CacheFile2 extends Cache {
 	override function compileRuntimeShader( shaders : hxsl.ShaderList, mode ) {
 		var rt = super.compileRuntimeShader(shaders, mode);
 		if( !isLoading ) {
-			log("Compiled runtime shader (" + mode.getName() + "): " + rt.spec.signature + ":" + [for( inst in rt.spec.instances ) @:privateAccess inst.shader.data.name].join(":"));
+			log("Compiled runtime shader (" + mode.getName() + "): " + rt.spec.signature + ":" + [for( inst in rt.spec.instances ) @:privateAccess inst.shader.data.name +'@${inst.bits}'].join(":"));
 		}
 		#if heaps_mt_hxsl_cache
 		var acquired = false;
 		if( isLoading ) {
 			rtMutex.acquire();
 			acquired = true;
+			// Compiled outside of the preload, would be lost since isDirty is ignored while loading
+			if( sys.thread.Thread.current() == sys.thread.Thread.main() )
+				compiledWhileLoading = true;
 		}
+		#else
+		if( isLoading && !preloading )
+			compiledWhileLoading = true;
 		#end
 		switch( mode ) {
 		case Default: runtimesDefault.push(rt);
@@ -341,7 +385,11 @@ class CacheFile2 extends Cache {
 
 		loadFile(loader, file);
 		if( outFile != file ) {
-			loadFile(loader, outFile);
+			try {
+				loadFile(loader, outFile);
+			} catch( e : Dynamic ) {
+				// ignore errors for local files
+			}
 		}
 
 		loader.run(function() {
@@ -350,6 +398,8 @@ class CacheFile2 extends Cache {
 			CacheFile2.LOAD_TIME = dt;
 			log('${runtimesDefault.length + runtimesBatch.length} shaders loaded in ${hxd.Math.fmt(dt)}s');
 			isLoading = false;
+			if( compiledWhileLoading )
+				isDirty = true;
 		});
 	}
 
@@ -365,7 +415,7 @@ class CacheFile2 extends Cache {
 		}
 
 		var magic = readLine();
-		if( !StringTools.startsWith(magic, "CF2-1") ) {
+		if( magic != 'CF2-$VERSION' ) {
 			f.close();
 			return false;
 		}
@@ -467,20 +517,155 @@ class CacheFile2 extends Cache {
 		return true;
 	}
 
-	function saveIfModified() {
+	public function saveIfModified() {
 		if( this.isDirty ) {
 			this.isDirty = false;
 			#if !shader_debug_dump
-			save();
+			_save();
 			#end
 		}
 	}
 
-	function save() {
-		if( !allowSave ) return;
+	public function dump(path: String, withCode : Bool=false) {
+		function addChild( parent : DumpNode, name : String ) : DumpNode {
+			for(child in parent.children) {
+				if( child.name == name ) {
+					child.count++;
+					return child;
+				}
+			}
+			var child = { name : name, count: 1, children : [] };
+			parent.children.push(child);
+			return child;
+		}
 
+		var root : DumpNode = { name : "shaders", count: 1, children : [] };
+		var stats = new Map<String, { name: String, count: Int }>();
+		var duplicates = new Map<String, Int>();
+		var variants = new Map<String, Map<Int, Bool>>();
+		var allShaders : Array<{ instances : Array<String>, count : Int }> = [];
+		var codedump = [];
+		var printer = new hxsl.Printer();
+
+		function collect( label : String, list : Array<RuntimeShader> ) {
+			if(withCode)
+				codedump.push("=== " + label + " (" + list.length + ") ===");
+			for( rt in list ) {
+				var n = root;
+				var instNames = [];
+				var count = rt.spec.instances.length;
+				for( i in 0...count ) {
+					var inst = rt.spec.instances[count - i - 1];
+					var baseName = @:privateAccess inst.shader.data.name;
+					if(baseName.indexOf("shaderLinker") == 0)
+						continue;
+					if( !variants.exists(baseName) )
+						variants.set(baseName, new Map());
+					variants.get(baseName).set(inst.bits, true);
+
+					var name = inst.bits != 0 ? baseName + ":" + inst.bits : baseName;
+					if(stats.exists(name)) {
+						var s = stats.get(name);
+						s.count++;
+					} else
+						stats.set(name, { name : name, count : 1 });
+					n = addChild(n, name);
+					instNames.push(name);
+				}
+				if( instNames.length > 0 ) {
+					allShaders.push({ instances : instNames, count : rt.spec.instances.length });
+					var counts = new Map<String, Int>();
+					for( n in instNames )
+						counts.set(n, (counts.exists(n) ? counts.get(n) : 0) + 1);
+					for( n => c in counts )
+						if( c > 1 )
+							duplicates.set(n, (duplicates.exists(n) ? duplicates.get(n) : 0) + 1);
+				}
+
+				if(withCode) {
+					codedump.push(StringTools.rpad("", "-", 40));
+					codedump.push(rt.spec.signature);
+					for( inst in rt.spec.instances )
+						codedump.push("  " + @:privateAccess inst.shader.data.name + "(bits=" + inst.bits + ")");
+					if( rt.vertex != null && rt.vertex.data != null ) {
+						codedump.push("// --- vertex ---");
+						codedump.push(rt.vertex.code ?? printer.shaderString(rt.vertex.data));
+						codedump.push("\n");
+					}
+					if( rt.fragment != null && rt.fragment.data != null ) {
+						codedump.push("// --- fragment ---");
+						codedump.push(rt.fragment.code ?? printer.shaderString(rt.fragment.data));
+						codedump.push("\n");
+					}
+					codedump.push("\n\n");
+				}
+			}
+		}
+		collect("Default", runtimesDefault);
+		collect("Batch", runtimesBatch);
+		collect("Compute", runtimesCompute);
+
+		var out = [];
+		out.push("--------------------------------");
+		out.push("# Stats");
+		var statLines = [for(k => v in stats) v];
+		statLines.sort((s1, s2) -> {
+			return Reflect.compare(s2.count, s1.count);
+		});
+		for( s in statLines ) {
+			out.push(StringTools.rpad(Std.string(s.count), " ", 8) + "| " + s.name);
+		}
+		out.push("\n\n");
+
+		out.push("--------------------------------");
+		out.push("# Duplicates");
+		var dupLines = [for(k => v in duplicates) { name: k, count: v }];
+		dupLines.sort((a, b) -> Reflect.compare(b.count, a.count));
+		if( dupLines.length == 0 )
+			out.push("none");
+		else
+			for( d in dupLines )
+				out.push(StringTools.rpad(Std.string(d.count), " ", 8) + "| " + d.name);
+		out.push("\n\n");
+
+		out.push("--------------------------------");
+		out.push("# Variants");
+		var variantLines = [for(k => v in variants) { name: k, bits: [for(b in v.keys()) b] }];
+		variantLines = variantLines.filter(v -> v.bits.length > 1);
+		variantLines.sort((a, b) -> Reflect.compare(b.bits.length, a.bits.length));
+		if( variantLines.length == 0 )
+			out.push("none");
+		else
+			for( v in variantLines ) {
+				v.bits.sort(Reflect.compare);
+				out.push(v.name);
+				for( b in v.bits )
+					out.push("    " + b);
+			}
+		out.push("\n\n");
+
+		out.push("--------------------------------");
+		out.push("# Shader trees");
+		function dumpRec( node : DumpNode, indent : String ) {
+			out.push(indent + node.name);
+			for( child in node.children )
+				dumpRec(child, indent + "    ");
+		}
+		for( child in root.children )
+			dumpRec(child, "");
+		out.push("\n\n");
+
+		if(withCode) {
+			out.push("--------------------------------");
+			out.push("# Shader code");
+			out.push(codedump.join("\n"));
+		}
+		sys.io.File.saveContent(path, out.join("\n"));
+	}
+
+	function _save() {
 		var out = new haxe.io.BytesOutput();
-		out.writeString("CF2-1\n", UTF8); // magic-version
+		out.writeString('CF2-$VERSION\n', UTF8);
 
 		linkers.sort((l1, l2) -> Reflect.compare(l1.name, l2.name));
 		for( lk in linkers ) {

@@ -4,8 +4,8 @@ class PointShadowMap extends CubeShadowMap {
 
 	var pshader : h3d.shader.PointShadow;
 
-	public function new( light : h3d.scene.Light, useWorldDist : Bool ) {
-		super(light, useWorldDist);
+	public function new( light : h3d.scene.Light ) {
+		super(light);
 		shader = pshader = new h3d.shader.PointShadow();
 	}
 
@@ -30,17 +30,15 @@ class PointShadowMap extends CubeShadowMap {
 		pshader.shadowMap = texture;
 		pshader.shadowBias = bias;
 		pshader.shadowPower = power;
-		pshader.lightPos = light.getAbsPos().getPosition();
+		pshader.lightPos.load(light.getAbsPos().getPosition());
 		pshader.zFar = pointLight.range;
 
+		pshader.SAMPLING_MODE = samplingKind;
 		// ESM
-		pshader.USE_ESM = samplingKind == ESM;
 		pshader.shadowPower = power;
 
 		// PCF
-		pshader.USE_PCF = samplingKind == PCF;
-		pshader.pcfScale = pcfScale / 100.0;
-		pshader.pcfQuality = pcfQuality;
+		pshader.pcfScale = pcfScale / texture.width;
 	}
 
 	override function createCollider(light : h3d.scene.Light) {

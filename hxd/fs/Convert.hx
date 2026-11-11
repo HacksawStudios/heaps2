@@ -13,11 +13,32 @@ class Convert {
 	public var params:Dynamic;
 	public var localParams:Dynamic;
 
-	public var srcPath:String;
+	public var srcPath(get, never):String;
 	public var dstPath:String;
 	public var baseDir:String;
 	public var originalFilename:String;
-	public var srcBytes:haxe.io.Bytes;
+	public var srcBytes(get, never):haxe.io.Bytes;
+
+	@:noCompletion var _srcPath:String;
+	@:noCompletion var _srcBytes:haxe.io.Bytes;
+
+	function get_srcPath() {
+		return _srcPath;
+	}
+
+	function get_srcBytes() {
+		if (_srcBytes == null && _srcPath != null)
+			_srcBytes = hxd.File.getBytes(_srcPath);
+		return _srcBytes;
+	}
+
+	public function setSource(path:String) {
+		if (path == _srcPath)
+			return;
+		_srcPath = path;
+		_srcBytes = null;
+	}
+
 	/*
 		The calculated hash for the input source file content.
 	*/
@@ -32,11 +53,10 @@ class Convert {
 	public function cleanup() {
 		params = null;
 		localParams = null;
-		srcPath = null;
+		setSource(null);
 		dstPath = null;
 		baseDir = null;
 		originalFilename = null;
-		srcBytes = null;
 		hash = null;
 	}
 
@@ -82,7 +102,13 @@ class Convert {
 
 	function command(cmd:String, args:Array<String>) {
 		#if (sys || nodejs)
+		#if nodejs
+		// no console window for each command on Windows (an Electron app)
+		var code : Null<Int> = js.node.ChildProcess.spawnSync(cmd, args, cast { stdio : "inherit", windowsHide : true }).status;
+		if (code == null) code = -1;
+		#else
 		var code = Sys.command(cmd, args);
+		#end
 		if (code != 0)
 			throw "Command '" + cmd + (args.length == 0 ? "" : " " + args.join(" ")) + "' failed with exit code " + code;
 		#else
@@ -104,14 +130,11 @@ class Convert {
 }
 
 #if (sys || nodejs)
-class ConvertFBX2HMD extends Convert {
-	var lastModelPropsPath : String;
-	var lastModelProps : Dynamic;
-	var modelLibCache = new Map<String, Array<Dynamic>>();
 
-	// hasLocalParams -> computeLocalParams
-	var foundModelProps : Bool;
-	var modelCollides : Map<String, Array<hxd.fmt.fbx.HMDOut.CollideParams>>;
+private typedef MatCollideInfo = { ignoreCollide : Bool, ref : Null<String>, name : Null<String> };
+
+class ConvertFBX2HMD extends Convert {
+
 	// computeLocalParams -> convert
 	var fbx : hxd.fmt.fbx.Data.FbxNode;
 	// context
@@ -123,34 +146,25 @@ class ConvertFBX2HMD extends Convert {
 
 	override function cleanup() {
 		super.cleanup();
-		foundModelProps = false;
-		modelCollides = null;
 		fbx = null;
 		matNames = null;
 	}
 
 	override function hasLocalParams():Bool {
-		var filePath = srcPath.substring(srcPath.lastIndexOf("/") + 1);
+		if( params != null && params.collide != null )
+			return true;
 		var dirPath = srcPath.substring(0, srcPath.lastIndexOf("/"));
-		// Parse model.props to find model config
 		var modelPropsPath = dirPath + "/" + h3d.prim.ModelDatabase.FILE_NAME;
-		modelCollides = [];
-		foundModelProps = parseModelProps(modelPropsPath, filePath, modelCollides);
-		return (params != null && params.collide != null) || foundModelProps;
+		return hxd.File.exists(modelPropsPath);
+	}
+
+	override function getLocalContext():Dynamic {
+		return matNames == null ? null : { matNames : matNames };
 	}
 
 	function parseModelProps( modelPropsPath : String, filePath : String, modelCollides : Map<String, Array<hxd.fmt.fbx.HMDOut.CollideParams>> ) : Bool {
 		var foundModelProps = false;
-		var modelProps = null;
-		try {
-			if( modelPropsPath == lastModelPropsPath ) {
-				modelProps = lastModelProps;
-			} else {
-				var res = hxd.File.getBytes(modelPropsPath).toString();
-				modelProps = haxe.Json.parse(res);
-			}
-		} catch( e ) {
-		}
+		var modelProps : Dynamic = getCachedFile(modelPropsPath, bytes -> haxe.Json.parse(bytes.toString()));
 		if( modelProps != null ) {
 			for( mp in Reflect.fields(modelProps) ) {
 				var mpFile = mp.substring(0, mp.lastIndexOf("/"));
@@ -167,78 +181,62 @@ class ConvertFBX2HMD extends Convert {
 				}
 			}
 		}
-		lastModelPropsPath = modelPropsPath;
-		lastModelProps = modelProps;
 		return foundModelProps;
 	}
 
-	override function getLocalContext():Dynamic {
-		return { matNames : matNames };
+	function findIgnoredMaterials( matPropsPath : String, filePath : String, matNames : Array<String> ) {
+		var ignoredMaterials : Array<String> = [];
+		var matProps = getCachedFile(matPropsPath, loadMatProps);
+		if( matProps != null ) {
+			for( configProps in matProps ) {
+				for( matName in matNames ) {
+					var m = configProps.get(matName + "/" + filePath);
+					if( m == null )
+						m = configProps.get(matName);
+					if( m == null )
+						continue;
+					if( m.ignoreCollide ) {
+						ignoredMaterials.push(matName);
+						continue;
+					}
+					// Look up the material library
+					if( m.ref != null && m.name != null ) {
+						var lib = getCachedFile(baseDir + m.ref, loadMatLib);
+						if( lib != null && lib.get(m.name) == true )
+							ignoredMaterials.push(matName);
+					}
+				}
+			}
+		}
+		return ignoredMaterials;
 	}
 
 	override function computeLocalParams(context:Dynamic):Dynamic {
 		var filePath = srcPath.substring(srcPath.lastIndexOf("/") + 1);
 		var dirPath = srcPath.substring(0, srcPath.lastIndexOf("/"));
-		// Parse model.props to find model config if not done in hasLocalParams
-		if( modelCollides == null ) {
-			var modelPropsPath = dirPath + "/" + h3d.prim.ModelDatabase.FILE_NAME;
-			modelCollides = [];
-			foundModelProps = parseModelProps(modelPropsPath, filePath, modelCollides);
-		}
-		// Parse fbx to find used materials
-		if( context != null && context.matNames != null && Std.isOfType(context.matNames, Array) ) {
-			matNames = context.matNames;
-		}
-		if( matNames == null ) {
-			fbx = try hxd.fmt.fbx.Parser.parse(srcBytes) catch (e:Dynamic) throw Std.string(e) + " in " + srcPath;
-			var matNodes = hxd.fmt.fbx.Data.FbxTools.getAll(fbx, "Objects.Material");
-			matNames = [];
-			for( o in matNodes ) {
-				var name = hxd.fmt.fbx.Data.FbxTools.getName(o);
-				matNames.push(name);
+		// Parse model.props to find modelCollides
+		var modelPropsPath = dirPath + "/" + h3d.prim.ModelDatabase.FILE_NAME;
+		var modelCollides : Map<String, Array<hxd.fmt.fbx.HMDOut.CollideParams>> = [];
+		var foundModelProps = parseModelProps(modelPropsPath, filePath, modelCollides);
+		// Parse fbx and material.props to find ignoredMaterials if has any collide config
+		var ignoredMaterials : Array<String> = [];
+		if( (params != null && params.collide != null) || foundModelProps ) {
+			// Parse fbx to find used materials or get from context
+			if( context != null && context.matNames != null && Std.isOfType(context.matNames, Array) ) {
+				matNames = context.matNames;
 			}
-		}
-		// Parse material.props to find material config
-		var ignoredMaterials = [];
-		var matPropsPath = dirPath + "/materials.props";
-		var matProps = null;
-		try {
-			var res = hxd.File.getBytes(matPropsPath).toString();
-			matProps = haxe.Json.parse(res).materials;
-		} catch( e ) {
-		}
-		if( matProps != null ) {
-			for( config in Reflect.fields(matProps) ) {
-				var configProps = Reflect.field(matProps, config);
-				for( matName in matNames ) {
-					var m = Reflect.field(configProps, matName + "/" + filePath);
-					if( m == null )
-						m = Reflect.field(configProps, matName);
-					if( m == null )
-						continue;
-					if( m.ignoreCollide == true ) {
-						ignoredMaterials.push(matName);
-						continue;
-					}
-					// Parse model library
-					if( m.__ref != null && m.name != null ) {
-						var libchildren = modelLibCache.get(m.__ref);
-						if( libchildren == null ) {
-							var lib = try haxe.Json.parse(hxd.File.getBytes(baseDir + m.__ref).toString()) catch( e ) null;
-							libchildren = lib?.children ?? [];
-							modelLibCache.set(m.__ref, libchildren);
-						}
-						for( c in libchildren ) {
-							if( c.type == "material" && c.name == m.name ) {
-								if( c.props?.PBR?.ignoreCollide == true ) {
-									ignoredMaterials.push(matName);
-								}
-								break;
-							}
-						}
-					}
+			if( matNames == null ) {
+				fbx = try hxd.fmt.fbx.Parser.parse(srcBytes) catch (e:Dynamic) throw Std.string(e) + " in " + srcPath;
+				var matNodes = hxd.fmt.fbx.Data.FbxTools.getAll(fbx, "Objects.Material");
+				matNames = [];
+				for( o in matNodes ) {
+					var name = hxd.fmt.fbx.Data.FbxTools.getName(o);
+					matNames.push(name);
 				}
 			}
+			// Parse material.props to find material config
+			var matPropsPath = dirPath + "/materials.props";
+			ignoredMaterials = findIgnoredMaterials(matPropsPath, filePath, matNames);
 		}
 		var localParams = {};
 		if( ignoredMaterials.length > 0 )
@@ -269,21 +267,30 @@ class ConvertFBX2HMD extends Convert {
 			if (params.collide != null) {
 				var collide = params.collide;
 				hmdout.generateCollides = {
-					precision : collide.precision,
 					maxConvexHulls : collide.maxConvexHulls,
-					maxSubdiv : collide.maxSubdiv,
+					unit : collide.unit,
+					scale : collide.scale,
 				};
 			}
 			if (params.lowp != null) {
 				var m:haxe.DynamicAccess<String> = params.lowp;
 				hmdout.lowPrecConfig = [];
-				for (k in m.keys())
-					hmdout.lowPrecConfig.set(k, switch (m.get(k)) {
+				for (k in m.keys()) {
+					var prec : hxd.BufferFormat.Precision = switch (m.get(k)) {
 						case "f16": F16;
 						case "u8": U8;
 						case "s8": S8;
+						case "remove":
+							switch(k) {
+							case "color": hmdout.noColor = true;
+							default: throw "Removal of attribute " + k + " is not supported";
+							}
+							hxd.BufferFormat.Precision.fromInt(-1);
 						case x: throw "Invalid precision '" + x + "' should be u8|s8|f16";
-					});
+					}
+					if (prec.toInt() != -1)
+						hmdout.lowPrecConfig.set(k, prec);
+				}
 			}
 			if ( params.optimizeMesh != null )
 				hmdout.optimizeMesh = params.optimizeMesh;
@@ -295,8 +302,14 @@ class ConvertFBX2HMD extends Convert {
 				hmdout.collisionThresholdHeight = params.collisionThresholdHeight;
 			if (params.collisionUseLowLod != null)
 				hmdout.collisionUseLowLod = params.collisionUseLowLod;
+			if (params.noCollision != null)
+				hmdout.noCollision = params.noCollision;
 			if (params.legacyScaleAxisConversion != null)
 				hmdout.legacyScaleAxisConversion = params.legacyScaleAxisConversion;
+			if (params.legacySkinImport != null)
+				hmdout.legacySkinImport = params.legacySkinImport;
+			if (params.maxUVs != null)
+				hmdout.maxUVs = params.maxUVs;
 		}
 		if( localParams != null ) {
 			if( localParams.ignoreCollideMaterials != null ) {
@@ -312,6 +325,49 @@ class ConvertFBX2HMD extends Convert {
 		var out = new haxe.io.BytesOutput();
 		new hxd.fmt.hmd.Writer(out).write(hmd);
 		save(out.getBytes());
+	}
+
+	static var fileCache = new Map<String, { time : Float, size : Int, value : Dynamic }>();
+
+	static function getCachedFile<T>( path : String, build : haxe.io.Bytes -> T ) : Null<T> {
+		if( !hxd.File.exists(path) )
+			return null;
+		var stat = @:privateAccess hxd.fs.FileConverter.statTimeAndSize(path);
+		var cached = fileCache.get(path);
+		if( cached != null && cached.time == stat.time && cached.size == stat.size )
+			return cached.value;
+		var value = build(hxd.File.getBytes(path));
+		fileCache.set(path, { time : stat.time, size : stat.size, value : value });
+		return value;
+	}
+
+	static function loadMatProps( bytes : haxe.io.Bytes ) : Array<Map<String, MatCollideInfo>> {
+		var configs = [];
+		var materials = haxe.Json.parse(bytes.toString()).materials;
+		for( config in Reflect.fields(materials) ) {
+			var configProps = Reflect.field(materials, config);
+			var mats = new Map<String, MatCollideInfo>();
+			for( key in Reflect.fields(configProps) ) {
+				var m : Dynamic = Reflect.field(configProps, key);
+				if( m == null ) continue;
+				var ignoreCollide = m.ignoreCollide == true;
+				if( !ignoreCollide && (m.__ref == null || m.name == null) ) continue;
+				mats.set(key, { ignoreCollide : ignoreCollide, ref : m.__ref, name : m.name });
+			}
+			configs.push(mats);
+		}
+		return configs;
+	}
+
+	static function loadMatLib( bytes : haxe.io.Bytes ) : Map<String, Bool> {
+		var mats = new Map<String, Bool>();
+		var children : Array<Dynamic> = haxe.Json.parse(bytes.toString())?.children ?? [];
+		for( c in children ) {
+			if( c.type != "material" || c.name == null ) continue;
+			if( !mats.exists(c.name) )
+				mats.set(c.name, c.props?.PBR?.ignoreCollide == true);
+		}
+		return mats;
 	}
 
 	static var _ = Convert.register(new ConvertFBX2HMD());
@@ -466,94 +522,140 @@ class CompressIMG extends Convert {
 		"RGB32F" => "R32G32B32_FLOAT",
 		"RGBA16F" => "R16G16B16A16_FLOAT",
 		"RGBA32F" => "R32G32B32A32_FLOAT",
+		"R8" => "R8_UNORM",
+		"RG8" => "R8G8_UNORM",
 		"RGBA" => "R8G8B8A8_UNORM",
 		"R16U" => "R16_UNORM",
 		"RG16U" => "R16G16_UNORM",
 		"RGBA16U" => "R16G16B16A16_UNORM",
+		"BC1" => "BC1_UNORM",
+		"BC3" => "BC3_UNORM",
+		"BC4" => "BC4_UNORM",
+		"BC5" => "BC5_UNORM",
+		"BC7" => "BC7_UNORM"
 	];
+
+	static inline var DDS_MAGIC = 0x20534444;
+	static inline var DDS_HEADER_SIZE = 128;
+	static inline var DDS_PITCH_POS = 20;
+	static inline var DDS_FOURCC_POS = 84;
+	static inline var D3DFMT_A16B16G16R16F = 113;
+	static inline var D3DFMT_A32B32G32R32F = 116;
+
+	static function isDDSFloat32(b:haxe.io.Bytes) {
+		return b.length > DDS_HEADER_SIZE && b.getInt32(0) == DDS_MAGIC && b.getInt32(DDS_FOURCC_POS) == D3DFMT_A32B32G32R32F;
+	}
+
+	static function ddsFloat32to16(src:haxe.io.Bytes) {
+		var count = (src.length - DDS_HEADER_SIZE) >> 2;
+		var out = haxe.io.Bytes.alloc(DDS_HEADER_SIZE + count * 2);
+		out.blit(0, src, 0, DDS_HEADER_SIZE);
+		out.setInt32(DDS_PITCH_POS, src.getInt32(DDS_PITCH_POS) >> 1);
+		out.setInt32(DDS_FOURCC_POS, D3DFMT_A16B16G16R16F);
+		for (i in 0...count)
+			out.setUInt16(DDS_HEADER_SIZE + i * 2, hxd.BufferFormat.float32to16(src.getFloat(DDS_HEADER_SIZE + i * 4)));
+		return out;
+	}
 
 	function makeImage(path:String) {
 		return @:privateAccess new hxd.res.Image(new hxd.fs.BytesFileSystem.BytesFileEntry(path, sys.io.File.getBytes(path)));
 	}
 
+	function runTexconv(srcPath:String, dstPath:String, args:Array<String>, outExt = "dds") {
+		var tmpPath = new haxe.io.Path(dstPath);
+		tmpPath.ext = "tmp." + new haxe.io.Path(srcPath).ext;
+		var input = tmpPath.toString();
+		try sys.FileSystem.deleteFile(input) catch (e) {};
+		sys.io.File.copy(srcPath, input);
+		try sys.FileSystem.deleteFile(dstPath) catch (e) {};
+		command("texconv", ["-y", "-nologo"].concat(args).concat([input]));
+		tmpPath.ext = 'tmp.$outExt';
+		var output = tmpPath.toString();
+		if ( sys.FileSystem.exists(output) )
+			sys.FileSystem.rename(output, dstPath);
+		try sys.FileSystem.deleteFile(input) catch (e) {};
+		return dstPath;
+	}
+
 	override function convert() {
-		var resizedImagePath:String = null;
-		var mips = hasParam("mips") && getParam("mips") == true;
-		if (hasParam("size")) {
-			try {
-				var maxSize = getParam("size");
-				var image = makeImage(srcPath);
-				var pxls = image.getPixels();
-				if (pxls.width == pxls.height && pxls.width > maxSize) {
-					pxls.dispose();
-					var prevMip = mips;
-					if (!prevMip)
-						Reflect.setField(params, "mips", true);
-					Reflect.deleteField(params, "size");
-					var tmpPath = new haxe.io.Path(dstPath);
-					tmpPath.ext = "forced_mips." + tmpPath.ext;
-					var prevDstPath = dstPath;
-					dstPath = tmpPath.toString();
-					convert();
-					dstPath = prevDstPath;
-					Reflect.setField(params, "size", maxSize);
-					if (!prevMip)
-						Reflect.deleteField(params, "mips");
-					var prevMipSize = hxd.res.Image.MIPMAP_MAX_SIZE;
-					hxd.res.Image.MIPMAP_MAX_SIZE = maxSize;
-					var mippedImage = makeImage(tmpPath.toString());
-					var resizedPixels = mippedImage.getPixels();
-					hxd.res.Image.MIPMAP_MAX_SIZE = prevMipSize;
-					srcPath = Sys.getEnv("TEMP") + "/output_resized_" + srcPath.split("/").pop();
-					resizedImagePath = srcPath;
-					sys.io.File.saveBytes(srcPath, resizedPixels.toPNG());
-					resizedPixels.dispose();
-					sys.FileSystem.deleteFile(tmpPath.toString());
-				}
-			} catch (e:Dynamic) {
-				trace("Faile to resize", e);
+		var cleanupFiles : Array<String> = null;
+		function cleanup() {
+			if(cleanupFiles == null) return;
+			for(file in cleanupFiles) {
+				try sys.FileSystem.deleteFile(file) catch (e:Dynamic) {};
 			}
 		}
-		var format = getParam("format");
-		var tcFmt = TEXCONV_FMT.get(format);
+		function tempFile(path: String, tag: String, ext=null) : String {
+			var spath = new haxe.io.Path(path);
+			var tmp = Sys.getEnv("TEMP") + '/${spath.file}.$tag.' + (ext != null ? ext : spath.ext);
+			tmp = haxe.io.Path.normalize(tmp);
+			if(cleanupFiles == null) cleanupFiles = [];
+			cleanupFiles.push(tmp);
+			return tmp;
+		}
+
+		var cachedImage : hxd.res.Image = null;
+		inline function getSrc() {
+			if (cachedImage == null)
+				cachedImage = makeImage(srcPath);
+			return cachedImage;
+		}
+		inline function isSrc16Bits() {
+			return getSrc().getPixelFormat().match(R16F|R16U|RG16F|RG16U|RGB16F|RGB16U|RGBA16F|RGBA16U);
+		}
+		inline function isSrc4x4aligned() {
+			var info = getSrc().getInfo();
+			return (info.width & 3) == 0 && (info.height & 3) == 0;
+		}
+
+		if (srcBytes.length == 0) {
+			save(srcBytes);
+			return;
+		}
+		var dstFmt : String = getParam("format");
+		// texconv would regenerate the mips, which hold the prefiltered levels of env maps
+		if (dstFmt == "RGBA16F" && isDDSFloat32(srcBytes)) {
+			save(ddsFloat32to16(srcBytes));
+			return;
+		}
+		var mips = hasParam("mips") && getParam("mips") == true;
+		if (hasParam("size")) {
+			var maxSize = getParam("size");
+			var image = getSrc();
+			var pxls = image.getPixels();
+			var srcFmt = Std.string(image.getPixelFormat());
+			var fmt = TEXCONV_FMT.get(srcFmt) ?? "RGBA";
+			if (pxls.width == pxls.height && pxls.width > maxSize) {
+				var resized = tempFile(srcPath, "resized", "dds");
+				var ssize = "" + maxSize;
+				var args = ["-m", "0", "-sepalpha", "-w", ssize, "-h", ssize, "-f", fmt];
+				if (hasParam("filter"))
+					args = args.concat(["-if", getParam("filter")]);
+				runTexconv(srcPath, resized, args);
+				setSource(resized);
+				cachedImage = null;
+			}
+		}
+		var isBCFormat = dstFmt.indexOf("BC") == 0;
+		var fix4x4 = isBCFormat && !isSrc4x4aligned();
+		var useTc = !isBCFormat || fix4x4 || isSrc16Bits();
+		var tcFmt = useTc ? TEXCONV_FMT.get(dstFmt) : null;
 		if (tcFmt != null) {
-			// texconv can only handle output dir, and it prepended to srcPath :'(
-			var tmpPath = new haxe.io.Path(dstPath);
-			tmpPath.ext = "tmp." + new haxe.io.Path(srcPath).ext;
-			var tmpFile = tmpPath.toString();
-			try
-				sys.FileSystem.deleteFile(tmpFile)
-			catch (e:Dynamic) {};
-			try
-				sys.FileSystem.deleteFile(dstPath)
-			catch (e:Dynamic) {};
-			sys.io.File.copy(srcPath, tmpFile);
-
-			var args = [
-				"-f",
-				tcFmt,
-				"-y",
-				"-nologo",
-				"-srgb", // Convert srgb to linear color space if target format doesn't support srgb (i.e from convertig from PNG to dds RGBA)
-				tmpFile
-			];
-
+			var args = ["-f", tcFmt, "-srgb"];
 			if (!mips)
 				args = ["-m", "1"].concat(args);
-			command("texconv", args);
-			sys.FileSystem.deleteFile(tmpFile);
-			tmpPath.ext = "tmp.DDS";
-			var p = tmpPath.toString();
-			if ( sys.FileSystem.exists(p) )
-				sys.FileSystem.rename(p, dstPath);
-			return;
+			if (hasParam("alpha") && dstFmt == "BC1")
+				args = ["-at", ""+ Std.parseInt("" + getParam("alpha")) / 256.0].concat(args);
+			runTexconv(srcPath, dstPath, args);
+			if (fix4x4)
+				runTexconv(dstPath, dstPath, ["-fixbc4x4"]);
+			return cleanup();
 		}
 		var path = new haxe.io.Path(srcPath);
 		if (path.ext == "dds") {
 			var image = makeImage(srcPath);
 			var info = image.getInfo();
 			if (info.layerCount > 1 && info.dataFormat == Dds) {
-				var oldBytes = srcBytes;
 				var oldPath = srcPath;
 				for (layer in 0...info.layerCount) {
 					var layerPixels = [];
@@ -566,16 +668,14 @@ class CompressIMG extends Convert {
 						pixels.dispose();
 					var tmpPath = dstPath + path.file + "_" + layer + "." + path.ext;
 					sys.io.File.saveBytes(tmpPath, layerBytes);
-					srcBytes = layerBytes;
-					srcPath = tmpPath;
+					setSource(tmpPath);
 					convert();
 					sys.FileSystem.deleteFile(tmpPath);
 				}
-				srcBytes = oldBytes;
-				srcPath = oldPath;
+				setSource(oldPath);
 				var convertPixels = [];
 				for (layer in 0...info.layerCount) {
-					var layerPath = dstPath + path.file + "_" + layer + "_dds_" + format + "." + path.ext;
+					var layerPath = dstPath + path.file + "_" + layer + "_dds_" + dstFmt + "." + path.ext;
 					var image = makeImage(layerPath);
 					for (mip in 0...info.mipLevels) {
 						var pixels = image.getPixels(null, mip);
@@ -586,9 +686,9 @@ class CompressIMG extends Convert {
 				var convertBytes = hxd.Pixels.toDDSLayers(convertPixels);
 				for (pixels in convertPixels)
 					pixels.dispose();
-				var tmpPath = dstPath + path.file + "_" + format + "." + path.ext;
+				var tmpPath = dstPath + path.file + "_" + dstFmt + "." + path.ext;
 				sys.io.File.saveBytes(tmpPath, convertBytes);
-				return;
+				return cleanup();
 			}
 		}
 		var args = ["-silent"];
@@ -600,17 +700,14 @@ class CompressIMG extends Convert {
 		var tmpPath = null;
 		if (ext == "envd" || ext == "envs") {
 			// copy temporary (compressonator uses file extension ;_;)
-			tmpPath = Sys.getEnv("TEMP") + "/output_" + dstPath.split("/").pop() + ".dds";
+			tmpPath = tempFile(dstPath, "tmp", "dds");
 			sys.io.File.saveBytes(tmpPath, sys.io.File.getBytes(srcPath));
 		}
-		if (hasParam("alpha") && format == "BC1")
+		if (hasParam("alpha") && dstFmt == "BC1")
 			args = args.concat(["-DXT1UseAlpha", "1", "-AlphaThreshold", "" + getParam("alpha")]);
 		args = args.concat(["-fd", "" + getParam("format"), tmpPath == null ? srcPath : tmpPath, dstPath]);
 		command("CompressonatorCLI", args);
-		if (tmpPath != null)
-			sys.FileSystem.deleteFile(tmpPath);
-		if (resizedImagePath != null)
-			sys.FileSystem.deleteFile(resizedImagePath);
+		cleanup();
 	}
 
 	static var _ = Convert.register(new CompressIMG("png,tga,jpg,jpeg,dds,envd,envs", "dds"));

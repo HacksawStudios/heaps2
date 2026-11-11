@@ -7,7 +7,7 @@ class GPUMeshBatch extends MeshBatch {
 	static var INDIRECT_DRAW_ARGUMENTS_FMT = hxd.BufferFormat.make([{ name : "", type : DVec4 }, { name : "", type : DFloat }]);
 	static var INSTANCES_INFOS_FMT = hxd.BufferFormat.make([{ name : "", type : DFloat }]);
 	inline static var INSTANCES_INFOS_ELEMENT_COUNT = 1;
-	inline static var SUB_MESHES_INFOS_ELEMENT_COUNT = 4;
+	inline static var SUB_MESHES_INFOS_ELEMENT_COUNT = 8;
 	inline static var SUB_PARTS_INFOS_ELEMENT_COUNT = 4;
 
 	var cpuInstancesInfos : haxe.io.Bytes;
@@ -35,7 +35,7 @@ class GPUMeshBatch extends MeshBatch {
 	public function new(primitive, ?material, ?parent) {
 		super(primitive, material, parent);
 
-		#if (js || (hldx && !dx12))
+		#if ((js || hldx) && !dx12 && !hlvk)
 		throw "Not available on this platform";
 		#end
 
@@ -124,10 +124,15 @@ class GPUMeshBatch extends MeshBatch {
 			var subPartsCount = 0;
 			var subPartsStart = 0;
 			for ( subMesh in primitiveSubMeshes ) {
-				tmpSubMeshesInfos[pos++] = subMesh.bounds.getBoundingRadius();
+				var bounds = subMesh.bounds;
+				tmpSubMeshesInfos[pos++] = (bounds.xMin + bounds.xMax) * 0.5;
+				tmpSubMeshesInfos[pos++] = (bounds.yMin + bounds.yMax) * 0.5;
+				tmpSubMeshesInfos[pos++] = (bounds.zMin + bounds.zMax) * 0.5;
+				tmpSubMeshesInfos[pos++] = bounds.getBoundingSphereRadius();
 				tmpSubMeshesInfos[pos++] = subMesh.lodCount;
 				tmpSubMeshesInfos[pos++] = subPartsStart;
 				tmpSubMeshesInfos[pos++] = subMesh.subParts.length;
+				tmpSubMeshesInfos[pos++] = 0.0;
 				subPartsCount += subMesh.subParts.length;
 				subPartsStart += subMesh.subParts.length * subMesh.lodCount;
 			}
@@ -235,7 +240,9 @@ class GPUMeshBatch extends MeshBatch {
 		} else {
 			commandCountNeeded = materialCount * instanceCount;
 			var computeShader : h3d.shader.InstanceIndirect = cast computeShader;
-			computeShader.radius = getPrimitive().getBounds().getBoundingRadius();
+			var bounds = getPrimitive().getBounds();
+			computeShader.center.set((bounds.xMin + bounds.xMax) * 0.5, (bounds.yMin + bounds.yMax) * 0.5, (bounds.zMin + bounds.zMax) * 0.5);
+			computeShader.radius = bounds.getBoundingSphereRadius();
 			computeShader.lodCount = getLodCount();
 			computeShader.subPartsCount = materialCount;
 		}
@@ -266,7 +273,11 @@ class GPUMeshBatch extends MeshBatch {
 			var computeShader = computePass.getShader(h3d.shader.InstanceIndirect.InstanceIndirectBase);
 			if ( gpuCullingEnabled )
 				computeShader.frustum = ctx.getCameraFrustumBuffer();
-			computeShader.instanceData = dataPasses.buffers[0];
+			computeShader.meshLodScale = ctx.meshLodScale;
+			var instanceData = dataPasses.buffers[0];
+			computeShader.instanceData = instanceData;
+			computeShader.instanceStride = instanceData.format.strideBytes >> 4;
+			computeShader.modelViewPos = instanceData.format.calculateInputOffset("modelView__m0") >> 4;
 			computeShader.commandBuffer = commandBuffer;
 			gpuCounter.reset();
 			computeShader.countBuffer = gpuCounter.buffer;
@@ -291,7 +302,7 @@ class GPUMeshBatch extends MeshBatch {
 	}
 
 	inline function isCountBufferAllowed() {
-		#if hlsdl
+		#if (hlsdl && !hlvk)
 		return h3d.impl.GlDriver.hasMultiIndirectCount;
 		#else
 		return true;
