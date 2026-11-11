@@ -42,3 +42,38 @@ Get started!
 * [Live samples with source code](https://heaps.io/samples/)
 * [Documentation](https://heaps.io/documentation/home.html)
 * [API documentation](https://heaps.io/api/)
+
+FBX material colors
+-------------------
+
+FBX-to-HMD conversion preserves explicitly exported `Properties70` material
+`DiffuseColor`, multiplied by `DiffuseFactor` when present (FBX default: 1).
+The HMD loader applies this RGB value as the material tint, including on textured
+materials. Explicit material setup and application code can override it. Materials
+without an exported diffuse color retain the material setup's default color.
+
+The color is stored in the appended HMD `DiffuseColor` property (index 8).
+Existing HMD files remain readable; files containing this property require the
+updated reader. The FBX converter cache version is incremented to regenerate
+cached models.
+
+FBX blend shapes
+----------------
+
+Connected Blender `BlendShape` / `BlendShapeChannel` / `Geometry` (`Shape`)
+exports are imported as HMD shapes using channel names. Each channel must
+contain exactly one target; progressive multi-target channels fail conversion.
+Skeleton discovery considers only `Skin` deformers. Set shape weights on the
+loaded mesh with `setBlendshapeWeight(name, weight)` (0 for the base, 1 for
+the full shape).
+
+Forward material shadow filtering
+---------------------------------
+
+`h3d.pass.DefaultShadowMap` forwards `samplingKind = PCF`, `pcfQuality`,
+`pcfScale`, and the actual shadow-map resolution to `h3d.shader.Shadow`.
+Quality 1 uses 4 samples, quality 2 uses 12, and quality 3 uses 64, sharing
+the directional shadow shader's Poisson offsets. `pcfScale` sets the sampling
+radius in shadow-map texels. Set `blur.radius = 0` when using PCF: filter
+visibility comparisons rather than raw depths. Non-PCF material shadows retain
+the existing exponential comparison.

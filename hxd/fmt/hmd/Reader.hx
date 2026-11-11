@@ -31,6 +31,8 @@ class Reader {
 			return HasColliders;
 		case 7:
 			return HasCustomCollider;
+		case 8:
+			return DiffuseColor(i.readFloat(), i.readFloat(), i.readFloat());
 		case unk:
 			throw "Unknown property #" + unk;
 		}

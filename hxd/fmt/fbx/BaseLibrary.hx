@@ -1,9 +1,8 @@
 package hxd.fmt.fbx;
-import haxe.io.Bytes;
-using hxd.fmt.fbx.Data;
 import h3d.col.Point;
-
+import haxe.io.Bytes;
 import haxe.xml.Access;
+using hxd.fmt.fbx.Data;
 
 class TmpObject {
 	public var index : Int;
@@ -184,6 +183,22 @@ class BaseLibrary {
 
 		for( c in root.childs )
 			init(c);
+
+		// Blender exports shapes as connected Geometry objects rather than nested Shape nodes.
+		for( g in root.getAll("Objects.Geometry") ) {
+			if( g.getType() != "Mesh" ) continue;
+			for( def in getChilds(g, "Deformer") ) {
+				if( def.getType() != "BlendShape" ) continue;
+				for( channel in getChilds(def, "Deformer") ) {
+					var shapes = getChilds(channel, "Geometry");
+					if( shapes.length != 1 || shapes[0].getType() != "Shape" )
+						throw "Expected one Shape geometry for blend-shape channel " + channel.getName();
+					var shape = shapes[0];
+					g.childs.push({ name : "Shape", props : [PString(channel.getName())], childs : shape.childs });
+					root.get("Objects").childs.remove(shape);
+				}
+			}
+		}
 
 		if (legacyScaleAxisConversion) {
 			if (normalizeScaleOrient)
@@ -488,9 +503,10 @@ class BaseLibrary {
 	}
 
 	function updateModelAxis() {
-		var originalUpAxis = "2";
+
+		var originalUpAxis = "1";
 		var upAxis = "1";
-		var frontAxis = "2";
+		var frontAxis = "-2";
 
 		for (p in root.getAll("GlobalSettings.Properties70.P")) {
 			switch (p.props[0].toString()) {
@@ -506,6 +522,7 @@ class BaseLibrary {
 
 		// Convert model if front axis isn't matching heaps's front axis
 		var preRot = new h3d.Vector(0, 0, 0);
+
 		if (frontAxis != "-0") {
 			switch (frontAxis) {
 				case "1" if (upAxis == "2"): preRot.z = 90;
@@ -515,6 +532,7 @@ class BaseLibrary {
 				default: 'Front axis $frontAxis is not supported';
 			}
 		}
+		// preRot.y = -90;
 
 		for (rootObject in getRootModels()) {
 			var props = rootObject.get("Properties70");
@@ -737,7 +755,9 @@ class BaseLibrary {
 		for( o in objects ) {
 			if( !o.isMesh ) continue;
 			var g = getChild(o.model, "Geometry");
-			var def = getChild(g, "Deformer", true);
+			var skins = [for( d in getChilds(g, "Deformer") ) if( d.getType() == "Skin" ) d];
+			if( skins.length > 1 ) throw "Multiple Skin deformers on " + g.getName();
+			var def = skins[0];
 			if( def == null ) continue;
 			var bones = [for( d in getChilds(def, "Deformer") ) hobjects.get(getChild(d, "Model").getId())];
 			if( bones.length == 0 ) continue;
@@ -1126,9 +1146,11 @@ class BaseLibrary {
 				}
 			}
 
-			// this can happen when resampling anims due to rounding errors, let's ignore it for now
-			//if( data.y.length != times.length || data.z.length != times.length )
-			//	throw "Unsynchronized curve components on " + model.getName()+"."+cname+" (" + data.x.length + "/" + data.y.length + "/" + data.z.length + ")";
+			// TRS components share one timeline, so independently simplified keys are unsupported.
+			if( (data.x != null && data.x.length != times.length)
+				|| (data.y != null && data.y.length != times.length)
+				|| (data.z != null && data.z.length != times.length) )
+				throw 'Unsynchronized animation curves in $fileName: $animName / ${model.getName()}.$cname. Re-export with baked animation and keyframe simplification disabled (Blender Simplify = 0).';
 			// optimize empty animations out
 			var M = 1.0;
 			var def = switch( cname ) {

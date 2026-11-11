@@ -21,6 +21,10 @@ class Writer {
 		case HasLod:
 		case HasCollider:
 		case HasColliders:
+		case DiffuseColor(r, g, b):
+			out.writeFloat(r);
+			out.writeFloat(g);
+			out.writeFloat(b);
 		case HasCustomCollider:
 		}
 	}

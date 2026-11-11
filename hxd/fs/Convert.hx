@@ -119,6 +119,7 @@ class ConvertFBX2HMD extends Convert {
 
 	public function new() {
 		super("fbx", "hmd");
+		version = 2;
 	}
 
 	override function cleanup() {
@@ -295,6 +296,9 @@ class ConvertFBX2HMD extends Convert {
 				hmdout.collisionThresholdHeight = params.collisionThresholdHeight;
 			if (params.collisionUseLowLod != null)
 				hmdout.collisionUseLowLod = params.collisionUseLowLod;
+			if (params.rightHanded != null) {
+				hmdout.rightHanded = params.rightHanded;
+			}
 			if (params.legacyScaleAxisConversion != null)
 				hmdout.legacyScaleAxisConversion = params.legacyScaleAxisConversion;
 		}

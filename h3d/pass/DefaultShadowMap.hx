@@ -7,6 +7,11 @@ class DefaultShadowMap extends DirShadowMap {
 	var shadowColorId : Int;
 	var shadowPowerId : Int;
 	var shadowBiasId : Int;
+	var shadowUsePCFId : Int;
+	var shadowPCFSamplesId : Int;
+	var shadowPCFOffsetsId : Int;
+	var shadowPCFScaleId : Int;
+	var shadowResolutionId : Int;
 
 	public var color : h3d.Vector;
 
@@ -22,6 +27,11 @@ class DefaultShadowMap extends DirShadowMap {
 		shadowColorId = hxsl.Globals.allocID("shadow.color");
 		shadowPowerId = hxsl.Globals.allocID("shadow.power");
 		shadowBiasId = hxsl.Globals.allocID("shadow.bias");
+		shadowUsePCFId = hxsl.Globals.allocID("shadow.usePCF");
+		shadowPCFSamplesId = hxsl.Globals.allocID("SHADOW_PCF_SAMPLES");
+		shadowPCFOffsetsId = hxsl.Globals.allocID("shadow.pcfOffsets");
+		shadowPCFScaleId = hxsl.Globals.allocID("shadow.pcfScale");
+		shadowResolutionId = hxsl.Globals.allocID("shadow.resolution");
 	}
 
 	override function draw( passes, ?sort ) {
@@ -31,6 +41,11 @@ class DefaultShadowMap extends DirShadowMap {
 		ctx.globals.fastSet(shadowColorId, color);
 		ctx.globals.fastSet(shadowPowerId, power);
 		ctx.globals.fastSet(shadowBiasId, bias);
+		ctx.globals.fastSet(shadowUsePCFId, samplingKind == PCF);
+		ctx.globals.fastSet(shadowPCFSamplesId, dshader.PCF_SAMPLES);
+		ctx.globals.fastSet(shadowPCFOffsetsId, dshader.poissonDisk);
+		ctx.globals.fastSet(shadowPCFScaleId, pcfScale);
+		ctx.globals.fastSet(shadowResolutionId, dshader.shadowRes);
 	}
 
 }

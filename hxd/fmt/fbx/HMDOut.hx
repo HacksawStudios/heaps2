@@ -29,6 +29,8 @@ enum abstract ShapeColliderType(String) to String {
 }
 
 class HMDOut extends BaseLibrary {
+	/** Preserve FBX right-handed coordinates instead of reflecting X. **/
+	public var rightHanded = false;
 	var d : Data;
 	var dataOut : haxe.io.BytesOutput;
 	var filePath : String;
@@ -588,8 +590,8 @@ class HMDOut extends BaseLibrary {
 				for( n in 0...count - 2 ) {
 					var idx = ibufs[skin.triangleGroups[stri++]];
 					idx.push(vertexRemap[start + n]);
-					idx.push(vertexRemap[start + count - 1]);
-					idx.push(vertexRemap[start + n + 1]);
+					idx.push(vertexRemap[rightHanded ? start + n + 1 : start + count - 1]);
+					idx.push(vertexRemap[rightHanded ? start + count - 1 : start + n + 1]);
 				}
 			}
 			// by-material index
@@ -608,8 +610,8 @@ class HMDOut extends BaseLibrary {
 				}
 				for( n in 0...count - 2 ) {
 					idx.push(vertexRemap[start + n]);
-					idx.push(vertexRemap[start + count - 1]);
-					idx.push(vertexRemap[start + n + 1]);
+					idx.push(vertexRemap[rightHanded ? start + n + 1 : start + count - 1]);
+					idx.push(vertexRemap[rightHanded ? start + count - 1 : start + n + 1]);
 				}
 			}
 
@@ -1256,6 +1258,21 @@ class HMDOut extends BaseLibrary {
 					}
 				}
 
+				// FBX DiffuseFactor defaults to 1 when not explicitly exported.
+				var diffuseColor = null;
+				var diffuseFactor = 1.;
+				for( p in m.getAll("Properties70.P") ) {
+					switch( p.props[0].toString() ) {
+					case "DiffuseColor":
+						diffuseColor = [p.props[4].toFloat(), p.props[5].toFloat(), p.props[6].toFloat()];
+					case "DiffuseFactor":
+						diffuseFactor = p.props[4].toFloat();
+					default:
+					}
+				}
+				if( diffuseColor != null )
+					mat.props = [DiffuseColor(diffuseColor[0] * diffuseFactor, diffuseColor[1] * diffuseFactor, diffuseColor[2] * diffuseFactor)];
+
 				// get texture
 				var texture = getSpecChild(m, "DiffuseColor");
 				if( texture != null ) {
@@ -1698,7 +1715,9 @@ class HMDOut extends BaseLibrary {
 		if( !includeGeometry )
 			optimizeSkin = false;
 
-		leftHandConvert();
+		if( !rightHanded ) {
+			leftHandConvert();
+		}
 		autoMerge();
 
 		if( filePath != null ) {

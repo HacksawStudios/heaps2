@@ -17,6 +17,7 @@ enum Property<T> {
 	HasCollider;
 	HasColliders;
 	HasCustomCollider;
+	DiffuseColor( r : Float, g : Float, b : Float );
 }
 
 typedef Properties = Null<Array<Property<Dynamic>>>;

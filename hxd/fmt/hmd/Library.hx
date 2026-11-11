@@ -323,6 +323,13 @@ class Library {
 		mat.name = m.name;
 		mat.model = resource;
 		mat.blendMode = m.blendMode;
+		if( m.props != null )
+			for( p in m.props )
+				switch( p ) {
+				case DiffuseColor(r, g, b):
+					mat.color.set(r, g, b, 1);
+				default:
+				}
 		var props = h3d.mat.MaterialSetup.current.loadMaterialProps(mat);
 		if( props == null ) props = mat.getDefaultModelProps();
 		#if hide
