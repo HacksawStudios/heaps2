@@ -1,18 +1,26 @@
 package h3d.prim;
 import h3d.col.Point;
 
+typedef PolygonLod = {
+	var prim : Polygon;
+	var screenRatio : Float;
+}
+
 class Polygon extends MeshPrimitive {
 
+	public var lods : Array<PolygonLod>;
 	public var points : Array<Point>;
 	public var normals : Array<Point>;
 	public var tangents : Array<Point>;
 	public var uvs : Array<UV>;
+	var additionalUVs = 0;
 	public var idx : hxd.IndexBuffer;
 	public var colors : Array<Point>;
 	var scaled = 1.;
 	var translatedX = 0.;
 	var translatedY = 0.;
 	var translatedZ = 0.;
+	var bounds : h3d.col.Bounds;
 
 	public function new( points, ?idx ) {
 		this.points = points;
@@ -20,15 +28,15 @@ class Polygon extends MeshPrimitive {
 	}
 
 	override function getBounds() {
-		var b = new h3d.col.Bounds();
-		for( p in points )
-			b.addPoint(p);
-		return b;
+		if( bounds == null ) {
+			bounds = new h3d.col.Bounds();
+			for( p in points )
+				bounds.addPoint(p);
+		}
+		return bounds;
 	}
 
-	override function alloc( engine : h3d.Engine ) {
-		dispose();
-
+	public function getBufferFormat() : hxd.BufferFormat {
 		var format = hxd.BufferFormat.POS3D;
 		if( normals != null )
 			format = format.append("normal", DVec3);
@@ -36,9 +44,18 @@ class Polygon extends MeshPrimitive {
 			format = format.append("tangent", DVec3);
 		if( uvs != null )
 			format = format.append("uv", DVec2);
+		if( additionalUVs > 0 )
+			format = format.append("uv2", DVec2);
+		if( additionalUVs > 1 )
+			format = format.append("uv3", DVec2);
+		if( additionalUVs > 2 )
+			format = format.append("uv4", DVec2);
 		if( colors != null )
 			format = format.append("color", DVec3);
+		return format;
+	}
 
+	public function getCPUBuffer() : hxd.FloatBuffer {
 		var buf = new hxd.FloatBuffer();
 		for( k in 0...points.length ) {
 			var p = points[k];
@@ -61,6 +78,10 @@ class Polygon extends MeshPrimitive {
 				var t = uvs[k];
 				buf.push(t.u);
 				buf.push(t.v);
+				for( _ in 0...additionalUVs ) {
+					buf.push(t.u);
+					buf.push(t.v);
+				}
 			}
 			if( colors != null ) {
 				var c = colors[k];
@@ -69,6 +90,14 @@ class Polygon extends MeshPrimitive {
 				buf.push(c.z);
 			}
 		}
+		return buf;
+	}
+
+	override function alloc( engine : h3d.Engine ) {
+		dispose();
+
+		var format = getBufferFormat();
+		var buf = getCPUBuffer();
 		buffer = h3d.Buffer.ofFloats(buf, format);
 		if( idx != null )
 			indexes = h3d.Indexes.alloc(idx);
@@ -114,6 +143,7 @@ class Polygon extends MeshPrimitive {
 		translatedX += dx;
 		translatedY += dy;
 		translatedZ += dz;
+		if( bounds != null ) bounds.offset(dx, dy, dz);
 		for( p in points ) {
 			p.x += dx;
 			p.y += dy;
@@ -123,6 +153,9 @@ class Polygon extends MeshPrimitive {
 
 	public function scale( s : Float ) {
 		scaled *= s;
+		if( bounds != null ) {
+			if( s >= 0 ) bounds.scalePivot(s) else bounds = null;
+		}
 		for( p in points ) {
 			p.x *= s;
 			p.y *= s;
@@ -213,6 +246,22 @@ class Polygon extends MeshPrimitive {
 		uvs = [];
 		for( i in 0 ... points.length )
 			uvs[i] = new UV(points[i].x, points[i].y);
+	}
+
+	/**
+		Add additional Uv sets that are a copy of the base uv set
+	**/
+	public function setUVCount(count: Int) {
+		if( count == 0 ) {
+			additionalUVs = 0;
+			uvs = null;
+			return;
+		}
+		if( count > 4 )
+			throw "max uv count is 4";
+		if( uvs == null )
+			addUVs();
+		additionalUVs = count - 1;
 	}
 
 	public function uvScale( su : Float, sv : Float ) {

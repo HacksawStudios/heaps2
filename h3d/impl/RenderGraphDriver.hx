@@ -172,10 +172,6 @@ class RenderGraphDriver extends Driver {
 		d.disposeTexture(t);
 	}
 
-	override function disposeDepthBuffer(t : h3d.mat.Texture ) {
-		d.disposeDepthBuffer(t);
-	}
-
 	override function disposeBuffer( b : h3d.Buffer ) {
 		d.disposeBuffer(b);
 	}
@@ -222,6 +218,10 @@ class RenderGraphDriver extends Driver {
 
 	override function copyTexture(from, to) {
 		return d.copyTexture(from, to);
+	}
+
+	override function setResidentMip(t, mip) {
+		return d.setResidentMip(t, mip);
 	}
 
 	override function allocQuery(queryKind) {

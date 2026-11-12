@@ -21,7 +21,20 @@ class TextureArray extends Texture {
 		preventAutoDispose();
 		var t = new TextureArray(width, height, layers, null, format);
 		h3d.pass.Copy.run(this, t);
-		lastFrame = old;
+		@:bypassAccessor lastFrame = old;
+		return t;
+	}
+
+	public static function defaultArrayTexture() {
+		var engine = h3d.Engine.getCurrent();
+		var t : h3d.mat.TextureArray = @:privateAccess engine.resCache.get(TextureArray);
+		if( t != null )
+			return t;
+		t = new TextureArray(1, 1, 1);
+		t.clear(0x202020);
+		t.realloc = function() t.clear(0x202020);
+		t.setName("defaultArrayTexture");
+		@:privateAccess engine.resCache.set(TextureArray, t);
 		return t;
 	}
 

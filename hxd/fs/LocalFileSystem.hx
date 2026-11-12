@@ -237,17 +237,12 @@ class LocalEntry extends FileEntry {
 		watchHandle = new hl.uv.Fs(hl.uv.Loop.getDefault(), originalFile, function(ev) {
 			switch(ev) {
 				case Change|Rename:
-					if(getModifTime() != lastChanged) {
-						lastChanged = getModifTime();
-						if(onChangedDelay != null)
-							onChangedDelay.stop();
-						onChangedDelay = haxe.Timer.delay(function() {
-							fs.convert.run(this);
-							onChanged();
-						}, 10);
-					}
+					if(onChangedDelay != null)
+						onChangedDelay.stop();
+					onChangedDelay = haxe.Timer.delay(() -> onFileChanged(onChanged, 0), 10);
 			}
 		});
+
 		#else
 		watchTime = getModifTime();
 		#end
@@ -261,14 +256,19 @@ class LocalEntry extends FileEntry {
 		#end
 
 		watchCallback = function() {
-			#if (js && multidriver && !macro)
+			#if ((editor || editor_hl) && !macro)
 			try {
 				fs.convert.run(this);
 			} catch ( e : Dynamic ) {
+				#if editor
 				hide.Ide.inst.quickMessage('Failed convert for ${name}, trying again');
 				// Convert failed, let's mark this watch as not performed.
 				watchTime = -1;
 				lastCheck = null;
+				#elseif editor_hl
+				hide.Ide.showError('Failed convert for ${name}, trying again');
+				#end
+
 				return;
 			}
 			#else
@@ -290,6 +290,29 @@ class LocalEntry extends FileEntry {
 			#end
 		}
 	}
+
+	#if (hl && (hl_ver >= version("1.12.0")) && !usesys)
+	function onFileChanged( onChanged : Void -> Void, errors : Int ) {
+		onChangedDelay = null;
+		if( watchHandle == null || !sys.FileSystem.exists(originalFile) )
+			return;
+		var time = getModifTime();
+		if( time == lastChanged )
+			return;
+		if( fileIsLocked(@:privateAccess Sys.getPath(originalFile)) ) {
+			onChangedDelay = haxe.Timer.delay(() -> onFileChanged(onChanged, errors), 250);
+			return;
+		}
+		try fs.convert.run(this) catch( e : Dynamic ) {
+			if( errors >= 5 )
+				throw e;
+			onChangedDelay = haxe.Timer.delay(() -> onFileChanged(onChanged, errors + 1), 250);
+			return;
+		}
+		lastChanged = time;
+		onChanged();
+	}
+	#end
 
 	#if multidriver
 	override function unwatch(id : Int) {
@@ -375,7 +398,8 @@ class LocalFileSystem implements FileSystem {
 		return true;
 	}
 	function checkPath(path: String) {
-		if (StringTools.contains(path, "../"))
+		// fullPath() resolves symlinks; a target outside baseDir can only get the leaf check
+		if (StringTools.contains(path, "../") || !StringTools.startsWith(path, baseDir))
 			return checkPathLeaf(path);
 		var relPath = path.substr(baseDir.length);
 		var split = relPath.split("/");

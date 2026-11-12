@@ -106,7 +106,7 @@ class Serializer {
 			out.addByte((dim.getIndex() << 1) | (arr ? 1 : 0));
 		case TRWTexture(dim, arr, chans):
 			out.addByte((dim.getIndex() << 3) | (arr ? 1 : 0) | ((chans - 1) << 1));
-		case TVoid, TInt, TBool, TFloat, TString, TMat2, TMat3, TMat4, TMat3x4, TTextureHandle:
+		case TVoid, TInt, TBool, TFloat, TString, TMat2, TMat3, TMat4, TMat3x4, TTextureHandle, TBufferHandle:
 		case __TUnused:
 			throw "assert";
 		}
@@ -175,6 +175,8 @@ class Serializer {
 			TChannel(input.readByte());
 		case 18:
 			TTextureHandle;
+		case 19:
+			TBufferHandle;
 		default:
 			throw "assert";
 		}
@@ -220,6 +222,9 @@ class Serializer {
 				case Doc(s): writeString(s);
 				case Borrow(s): writeString(s);
 				case Sampler(s): writeString(s);
+				case Enum(path, constructors):
+					writeString(path);
+					writeArr(constructors, writeString);
 				}
 			}
 		}
@@ -457,6 +462,8 @@ class Serializer {
 				case 12: Sampler(readString());
 				case 13: Final;
 				case 14: Flat;
+				case 15: NoVar;
+				case 16: Enum(readString(), readArr(readString));
 				default: throw "assert";
 				}
 				v.qualifiers.push(q);

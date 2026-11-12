@@ -198,6 +198,15 @@ class CustomParser extends domkit.CssValue.ValueParser {
 				#else
 				return hxd.res.DefaultFont.get();
 				#end
+			case VCall("group",fonts):
+				#if macro
+				for( f in fonts )
+					parseFont(f);
+				#else
+				var fnt = @:privateAccess new h2d.Font("group",0,FontGroup);
+				fnt.subFonts = [for( f in fonts ) parseFont(f)];
+				return fnt;
+				#end
 			case VGroup(args):
 				var args = args.copy();
 				path = parsePath(args[0]);
@@ -319,6 +328,13 @@ class CustomParser extends domkit.CssValue.ValueParser {
 		case VIdent("move"): Move;
 		case VIdent("textinput") | VIdent("input"): TextInput;
 		case VIdent("hide"): Hide;
+
+		// use both css and hxd.Cursor names
+		case VIdent("ns-resize") | VIdent("resize-ns"): ResizeNS;
+		case VIdent("ew-resize") | VIdent("resize-we"): ResizeWE;
+		case VIdent("nwse-resize") | VIdent("resize-nwse"): ResizeNWSE;
+		case VIdent("nesw-resize") | VIdent("resize-nesw"): ResizeNESW;
+		case VIdent("none"): null;
 		default: invalidProp();
 		}
 	}
@@ -344,6 +360,15 @@ class CustomParser extends domkit.CssValue.ValueParser {
 			#else
 				var f = new h2d.filter.ColorMatrix();
 				f.matrix.colorSaturate(v);
+				f;
+			#end
+		case VCall("hue",[v]):
+			var v = parseFloat(v);
+			#if macro
+				true;
+			#else
+				var f = new h2d.filter.ColorMatrix();
+				f.matrix.colorHue(v*Math.PI/180);
 				f;
 			#end
 		case VCall("outline",[s, c]):
@@ -868,6 +893,7 @@ class TextComp extends DrawableComp implements domkit.Component.ComponentDecl<h2
 	@:p var letterSpacing = 0;
 	@:p var lineSpacing = 0;
 	@:p var lineBreak : Bool;
+	@:p var wordBreak : Bool;
 	@:p(none) var maxWidth : Null<Int>;
 	@:p var textAlign : h2d.Text.Align = Left;
 	@:p(textShadow) var textShadow : { dx : Float, dy : Float, color : Int, alpha : Float };
@@ -887,6 +913,10 @@ class TextComp extends DrawableComp implements domkit.Component.ComponentDecl<h2
 
 	static function set_lineBreak( t : h2d.Text, v ) {
 		t.lineBreak = v;
+	}
+
+	static function set_wordBreak( t : h2d.Text, v ) {
+		t.wordBreak = v;
 	}
 
 	#if !domkit_drawable_color

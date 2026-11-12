@@ -275,7 +275,7 @@ class Splitter {
 								if ( nv.qualifiers == null )
 									nv.qualifiers = [];
 								nv.qualifiers.push(q);
-							case Const(_), Private, Nullable, PerObject, Name(_), Shared, Precision(_), Range(_,_), Ignore, PerInstance(_), Doc(_), Borrow(_), Sampler(_):
+							case Const(_), Private, Nullable, PerObject, Name(_), Shared, Precision(_), Range(_,_), Ignore, PerInstance(_), Doc(_), Borrow(_), Sampler(_), Enum(_):
 							}
 						}
 					}
@@ -368,7 +368,7 @@ class Splitter {
 				checkSyntaxExpr(arg.e);
 				checkExpr(arg.e);
 			}
-		case TCall({ e : TGlobal(ResolveSampler)}, [handle, { e : TVar(v)}]):
+		case TCall({ e : TGlobal(ResolveSampler|ResolveBuffer)}, [handle, { e : TVar(v)}]):
 			var inf = get(v);
 			inf.write++;
 			checkExpr(handle);

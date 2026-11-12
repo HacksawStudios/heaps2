@@ -180,8 +180,13 @@ class Pass {
 
 	function addSelfShader<T:hxsl.Shader>(s:T) : T {
 		if ( s == null ) return null;
-		selfShadersChanged = true;
-		selfShaders = hxsl.ShaderList.addSort(s, selfShaders);
+		if ( selfShaders == selfShadersCache ) {
+			selfShaders = new hxsl.ShaderList(s, shaders);
+			selfShaders.next = selfShadersCache = shaders;
+		} else {
+			selfShadersChanged = true;
+			selfShaders = hxsl.ShaderList.addSort(s, selfShaders);
+		}
 		return s;
 	}
 
@@ -219,8 +224,6 @@ class Pass {
 		var shaderFound = false;
 		while( sl != null ) {
 			if( sl.s == s ) {
-				if ( selfShadersCache == sl )
-					selfShadersCache = selfShadersCache.next;
 				if( prev == null )
 					shaders = sl.next;
 				else
@@ -254,8 +257,6 @@ class Pass {
 		var prev = null;
 		while( sl != null ) {
 			if( Std.isOfType(sl.s, t) ) {
-				if ( selfShadersCache == sl )
-					selfShadersCache = selfShadersCache.next;
 				if( prev == null )
 					shaders = sl.next;
 				else
@@ -327,19 +328,24 @@ class Pass {
 		}
 	}
 
+	inline function findTail(first : hxsl.ShaderList, last : hxsl.ShaderList) {
+		var sl = first, prev = null;
+		while ( sl != null && sl != last ) {
+			prev = sl;
+			sl = sl.next;
+		}
+		return prev;
+	}
+
 	function selfShadersRec(rebuild : Bool) {
 		if ( selfShaders == null )
 			return shaders;
 		if ( !selfShadersChanged && !rebuild && shaders == selfShadersCache )
 			return selfShaders;
-		var sl = selfShaders, prev = null;
-		while ( sl != null && sl != selfShadersCache ) {
-			prev = sl;
-			sl = sl.next;
-		}
+		var tail = findTail(selfShaders, selfShadersCache);
 		selfShadersCache = shaders;
-		if ( prev != null )
-			prev.next = selfShadersCache;
+		if ( tail != null )
+			tail.next = selfShadersCache;
 		else
 			selfShaders = shaders;
 		return selfShaders;
@@ -350,18 +356,12 @@ class Pass {
 			return selfShadersRec(false);
 		}
 		// relink to our parent shader list
-		var s = shaders, prev = null;
-		while( s != null && s != parentShaders ) {
-			prev = s;
-			s = s.next;
-		}
-		if ( s != parentShaders )
-			prev = null;
+		var tail = findTail(shaders, parentShaders);
 		parentShaders = parentPass.shaders;
-		if( prev == null )
+		if( tail == null )
 			shaders = parentShaders;
 		else
-			prev.next = parentShaders;
+			tail.next = parentShaders;
 		return selfShadersRec(true);
 	}
 
@@ -376,18 +376,14 @@ class Pass {
 	}
 
 	#if !macro
-	public function clone() {
-		var p = new Pass(name, shaders.clone());
-		if ( selfShaders != null ) {
-			var sl = selfShaders;
-			var prev = null;
-			while ( sl != null && sl != shaders)  {
-				prev = sl;
-				sl = sl.next;
-			}
-			prev.next = null;
+	public function clone( ?parent : Pass ) {
+		var sl = shaders == null ? null : (parent == null ? shaders.clone() : shaders.clone(parentShaders));
+		var p = new Pass(name, sl, parent);
+		var tail = findTail(selfShaders, selfShadersCache);
+		if ( tail != null ) {
+			tail.next = null;
 			p.selfShaders = selfShaders.clone();
-			prev.next = sl;
+			tail.next = selfShadersCache = shaders;
 		}
 		p.loadBits(bits);
 		p.loadFlags(flags);
@@ -396,6 +392,42 @@ class Pass {
 		if (stencil != null) p.stencil = stencil.clone();
 		return p;
 	}
-	#end
 
+	public static function bitsToFields( bits : Int ) : Array<{ name : String, value : String }> {
+		static var FACES : Array<h3d.mat.Data.Face> = Type.allEnums(h3d.mat.Data.Face);
+		static var COMPARES : Array<h3d.mat.Data.Compare> = Type.allEnums(h3d.mat.Data.Compare);
+		static var BLENDS : Array<h3d.mat.Data.Blend> = Type.allEnums(h3d.mat.Data.Blend);
+		static var OPS : Array<h3d.mat.Data.Operation> = Type.allEnums(h3d.mat.Data.Operation);
+
+		inline function shiftOf( mask : Int ) {
+			var s = 0;
+			while( mask & 1 == 0 ) { mask >>>= 1; s++; }
+			return s;
+		}
+
+		inline function get( bits : Int, mask : Int ) : Int {
+			return (bits & mask) >>> shiftOf(mask);
+		}
+
+		inline function name<T>( values : Array<T>, idx : Int ) : String {
+			return idx < values.length ? Std.string(values[idx]) : 'invalid($idx)';
+		}
+
+		inline function b( mask ) return get(bits, mask) != 0 ? "true" : "false";
+
+		return [
+			{ name : "culling",       value : name(FACES,    get(bits, Pass.culling_mask)) },
+			{ name : "depthWrite",    value : b(Pass.depthWrite_mask) },
+			{ name : "depthClamp",    value : b(Pass.depthClamp_mask) },
+			{ name : "depthTest",     value : name(COMPARES, get(bits, Pass.depthTest_mask)) },
+			{ name : "blendSrc",      value : name(BLENDS,   get(bits, Pass.blendSrc_mask)) },
+			{ name : "blendDst",      value : name(BLENDS,   get(bits, Pass.blendDst_mask)) },
+			{ name : "blendAlphaSrc", value : name(BLENDS,   get(bits, Pass.blendAlphaSrc_mask)) },
+			{ name : "blendAlphaDst", value : name(BLENDS,   get(bits, Pass.blendAlphaDst_mask)) },
+			{ name : "blendOp",       value : name(OPS,      get(bits, Pass.blendOp_mask)) },
+			{ name : "blendAlphaOp",  value : name(OPS,      get(bits, Pass.blendAlphaOp_mask)) },
+			{ name : "wireframe",     value : b(Pass.wireframe_mask) },
+		];
+	}
+	#end
 }

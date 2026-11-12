@@ -1,6 +1,6 @@
 package h3d.impl;
 
-#if (hldx && !dx12)
+#if (hldx && !dx12 && !hlvk)
 
 import h3d.impl.Driver;
 import dx.Driver;
@@ -100,7 +100,7 @@ class DirectXDriver extends h3d.impl.Driver {
 
 	var depthStates : Map<Int,{ def : DepthStencilState, stencils : Array<{ op : Int, mask : Int, state : DepthStencilState }> }>;
 	var blendStates : Map<Int,BlendState>;
-	var rasterStates : Map<Int,RasterState>;
+	var rasterStates : #if (haxe_ver < 5) hl.types.Int64Map #else Map<haxe.Int64,RasterState> #end;
 	var samplerStates : Map<Int,SamplerState>;
 	var currentDepthState : DepthStencilState;
 	var currentBlendState : BlendState;
@@ -110,6 +110,8 @@ class DirectXDriver extends h3d.impl.Driver {
 	var outputWidth : Int;
 	var outputHeight : Int;
 	var hasScissor = false;
+	var useDepthClamp = false;
+	var depthBiasBits = 0;
 	var shaderVersion : String;
 
 	var window : dx.Window;
@@ -153,12 +155,12 @@ class DirectXDriver extends h3d.impl.Driver {
 		}
 		if( depthStates != null ) for( s in depthStates ) { if( s.def != null ) s.def.release(); for( s in s.stencils ) if( s.state != null ) s.state.release(); }
 		if( blendStates != null ) for( s in blendStates ) if( s != null ) s.release();
-		if( rasterStates != null ) for( s in rasterStates ) if( s != null ) s.release();
+		if( rasterStates != null ) for( s in rasterStates ) { var s : RasterState = s; if( s != null ) s.release(); }
 		if( samplerStates != null ) for( s in samplerStates ) if( s != null ) s.release();
 		shaders = new Map();
 		depthStates = new Map();
 		blendStates = new Map();
-		rasterStates = new Map();
+		rasterStates = #if (haxe_ver < 5) new hl.types.Int64Map() #else new Map() #end;
 		samplerStates = new Map();
 		vertexShader = new PipelineState(Vertex);
 		pixelShader = new PipelineState(Pixel);
@@ -256,7 +258,7 @@ class DirectXDriver extends h3d.impl.Driver {
 		if( extraDepthInst != null ) @:privateAccess {
 			extraDepthInst.width = width;
 			extraDepthInst.height = height;
-			if( extraDepthInst.t != null ) disposeDepthBuffer(extraDepthInst);
+			disposeTexture(extraDepthInst);
 			extraDepthInst.t = allocDepthBuffer(extraDepthInst);
 		}
 	}
@@ -361,15 +363,6 @@ class DirectXDriver extends h3d.impl.Driver {
 		return { res : depth, view : srv, depthView : depthView, readOnlyDepthView : readOnlyDepthView, rt : null };
 	}
 
-	override function disposeDepthBuffer(b:h3d.mat.Texture) @:privateAccess {
-		var d = b.t;
-		b.t = null;
-		d.depthView.release();
-		d.readOnlyDepthView.release();
-		d.view.release();
-		d.res.release();
-	}
-
 	override function captureRenderBuffer( pixels : hxd.Pixels ) {
 		var rt = curTexture;
 		if( rt == null )
@@ -420,19 +413,20 @@ class DirectXDriver extends h3d.impl.Driver {
 	override function allocTexture(t:h3d.mat.Texture):Texture {
 
 		var mips = 1;
+		var r = t.residentMip;
 		if( t.flags.has(MipMapped) )
-			mips = t.mipLevels;
+			mips = t.mipLevels - r;
 
 		var rt = t.flags.has(Target);
 		var isCube = t.flags.has(Cube);
 		var isArray = t.flags.has(IsArray);
 
 		var desc = new Texture2dDesc();
-		desc.width = t.width;
-		desc.height = t.height;
+		desc.width = r == 0 ? t.width : hxd.Math.imax(1, t.width >> r);
+		desc.height = r == 0 ? t.height : hxd.Math.imax(1, t.height >> r);
 		desc.format = getTextureFormat(t);
 
-		if( t.format.match(S3TC(_)) && (t.width & 3 != 0 || t.height & 3 != 0) )
+		if( t.format.match(S3TC(_)) && (desc.width & 3 != 0 || desc.height & 3 != 0) )
 			throw t+" is compressed "+t.width+"x"+t.height+" but should be a 4x4 multiple";
 
 		desc.usage = Default;
@@ -479,6 +473,8 @@ class DirectXDriver extends h3d.impl.Driver {
 		if( tt == null ) return;
 		t.t = null;
 		if( tt.view != null ) tt.view.release();
+		if( tt.depthView != null ) tt.depthView.release();
+		if( tt.readOnlyDepthView != null ) tt.readOnlyDepthView.release();
 		if( tt.res != null ) tt.res.release();
 		if( tt.views != null )
 			for( v in tt.views )
@@ -608,9 +604,9 @@ class DirectXDriver extends h3d.impl.Driver {
 			box.bottom = y + desc.height;
 			box.back = 1;
 			box.front = 0;
-			tmp.copySubresourceRegion(0,0,0,0,tex.t.res,tex.mipLevels * layer + mipLevel, box);
+			tmp.copySubresourceRegion(0,0,0,0,tex.t.res,getSubResource(tex, mipLevel, layer), box);
 		} else {
-			tmp.copySubresourceRegion(0,0,0,0,tex.t.res,tex.mipLevels * layer + mipLevel, null);
+			tmp.copySubresourceRegion(0,0,0,0,tex.t.res,getSubResource(tex, mipLevel, layer), null);
 		}
 
 		var pitch = 0;
@@ -637,17 +633,24 @@ class DirectXDriver extends h3d.impl.Driver {
 		pixels.dispose();
 	}
 
+	function getSubResource( t : h3d.mat.Texture, mipLevel : Int, layer : Int ) {
+		if( mipLevel < t.residentMip ) throw "Mip level " + mipLevel + " is not resident in " + t;
+		var mips = t.flags.has(MipMapped) ? t.mipLevels - t.residentMip : 1;
+		return (mipLevel - t.residentMip) + layer * mips;
+	}
+
 	override function uploadTexturePixels(t:h3d.mat.Texture, pixels:hxd.Pixels, mipLevel:Int, side:Int) {
 		pixels.convert(t.format);
 		if( hasDeviceError ) return;
 		var mipLevels = t.mipLevels;
 		if( mipLevel >= mipLevels ) throw "Mip level outside texture range : " + mipLevel + " (max = " + (mipLevels - 1) + ")";
+		var subRes = getSubResource(t, mipLevel, side);
 		var stride = @:privateAccess pixels.stride;
 		switch( t.format ) {
 		case S3TC(n): stride = pixels.width * ((n == 1 || n == 4) ? 2 : 4); // "uncompressed" stride ?
 		default:
 		}
-		t.t.res.updateSubresource(mipLevel + side * mipLevels, null, (pixels.bytes:hl.Bytes).offset(pixels.offset), stride, 0);
+		t.t.res.updateSubresource(subRes, null, (pixels.bytes:hl.Bytes).offset(pixels.offset), stride, 0);
 		updateResCount++;
 		t.flags.set(WasCleared);
 	}
@@ -659,6 +662,7 @@ class DirectXDriver extends h3d.impl.Driver {
 		var mask = pass.colorMask;
 
 		if( hasScissor ) bits |= SCISSOR_BIT;
+		if( useDepthClamp ) bits |= Pass.depthClamp_mask;
 
 		var stOpBits = pass.stencil != null ? @:privateAccess pass.stencil.opBits : -1;
 		var stMaskBits = pass.stencil != null ? @:privateAccess pass.stencil.maskBits : -1;
@@ -721,8 +725,9 @@ class DirectXDriver extends h3d.impl.Driver {
 			Driver.omSetDepthStencilState(depth, ref);
 		}
 
-		var rasterBits = bits & (Pass.culling_mask | SCISSOR_BIT | Pass.wireframe_mask);
-		var raster = rasterStates.get(rasterBits);
+		var rasterBits = bits & (Pass.culling_mask | SCISSOR_BIT | Pass.wireframe_mask | Pass.depthClamp_mask);
+		var rasterKey = haxe.Int64.make(depthBiasBits, rasterBits);
+		var raster : RasterState = rasterStates.get(rasterKey);
 		if( raster == null ) {
 			var desc = new RasterizerDesc();
 			if ( pass.wireframe ) {
@@ -732,10 +737,12 @@ class DirectXDriver extends h3d.impl.Driver {
 				desc.fillMode = Solid;
 				desc.cullMode = CULL[Pass.getCulling(bits)];
 			}
-			desc.depthClipEnable = true;
+			desc.depthClipEnable = bits & Pass.depthClamp_mask == 0;
 			desc.scissorEnable = bits & SCISSOR_BIT != 0;
+			desc.depthBias = (depthBiasBits << 16) >> 16;
+			desc.slopeScaledDepthBias = haxe.io.FPHelper.i32ToFloat(depthBiasBits & 0xFFFF0000);
 			raster = Driver.createRasterizerState(desc);
-			rasterStates.set(rasterBits, raster);
+			rasterStates.set(rasterKey, raster);
 		}
 
 		allowDraw = pass.culling != Both;
@@ -836,9 +843,6 @@ class DirectXDriver extends h3d.impl.Driver {
 		var h = new hxsl.HlslOut();
 		if( shader.code == null ){
 			shader.code = h.run(shader.data);
-			#if !heaps_compact_mem
-			shader.data.funs = null;
-			#end
 		}
 		var bytes = getBinaryPayload(shader.kind == Vertex, shader.code);
 		if( bytes == null ) {
@@ -902,7 +906,7 @@ class DirectXDriver extends h3d.impl.Driver {
 
 	override function getNativeShaderCode( shader : hxsl.RuntimeShader ) {
 		function dumpShader(s:hxsl.RuntimeShader.RuntimeShaderData) {
-			var code = new hxsl.HlslOut().run(s.data);
+			var code = s.code ?? new hxsl.HlslOut().run(s.data);
 			try {
 				var scomp = compileShader(s, true).bytes;
 				code += "\n// ASM=\n" + Driver.disassembleShader(scomp, None, null) + "\n\n";
@@ -915,7 +919,10 @@ class DirectXDriver extends h3d.impl.Driver {
 
 	override function hasFeature(f:Feature) {
 		return switch(f) {
-		case Queries, BottomLeftCoords, Bindless:
+		// rendering into a single depth array slice needs a sliced DSV, which hldx does not expose
+		case Queries, BottomLeftCoords, Bindless, DepthTextureArray, ComputeShaders:
+			false;
+		case DynamicSamplerIndex:
 			false;
 		default:
 			true;
@@ -923,18 +930,39 @@ class DirectXDriver extends h3d.impl.Driver {
 	}
 
 	override function copyTexture(from:h3d.mat.Texture, to:h3d.mat.Texture) {
-		if( from.t == null || from.format != to.format || from.width != to.width || from.height != to.height || from.layerCount != to.layerCount )
+		if( from.t == null || from.format != to.format || from.width != to.width || from.height != to.height || from.layerCount != to.layerCount || from.residentMip != to.residentMip )
 			return false;
 		if( to.t == null ) {
 			var prev = from.lastFrame;
 			from.preventAutoDispose();
 			to.alloc();
-			from.lastFrame = prev;
+			@:bypassAccessor from.lastFrame = prev;
 			if( from.t == null ) throw "assert";
 			if( to.t == null ) return false;
 		}
 		to.t.res.copyResource(from.t.res);
 		to.flags.set(WasCleared);
+		return true;
+	}
+
+	override function setResidentMip( t : h3d.mat.Texture, mip : Int ) : Bool {
+		var prevMip = t.residentMip;
+		var wasCleared = t.flags.has(WasCleared);
+		t.residentMip = mip;
+		var tt = allocTexture(t);
+		if( wasCleared ) t.flags.set(WasCleared); // content is kept
+		if( tt == null ) {
+			t.residentMip = prevMip;
+			return false;
+		}
+		// copy the mip levels common to both allocations
+		var levels = t.mipLevels;
+		var first = mip > prevMip ? mip : prevMip;
+		for( layer in 0...t.layerCount )
+			for( m in first...levels )
+				tt.res.copySubresourceRegion((m - mip) + layer * (levels - mip), 0, 0, 0, t.t.res, (m - prevMip) + layer * (levels - prevMip), null);
+		disposeTexture(t);
+		t.t = tt;
 		return true;
 	}
 
@@ -1046,9 +1074,11 @@ class DirectXDriver extends h3d.impl.Driver {
 		Driver.rsSetViewports(1, viewport);
 	}
 
-	override function setDepth( depthBuffer : h3d.mat.Texture ) {
+	override function setDepth( depthBuffer : h3d.mat.Texture, layer = 0 ) {
 		if( hasDeviceError )
 			return;
+		if( layer != 0 || (depthBuffer != null && depthBuffer.flags.has(IsArray)) )
+			throw "Not implemented";
 		currentDepth = @:privateAccess (depthBuffer == null ? null : depthBuffer.t);
 		depthBuffer.lastFrame = frame;
 		unbind(currentDepth.view);
@@ -1061,6 +1091,20 @@ class DirectXDriver extends h3d.impl.Driver {
 		viewport[3] = h;
 		viewport[5] = 1.;
 		Driver.rsSetViewports(1, viewport);
+	}
+
+	override function setDepthClamp( enabled : Bool ) {
+		useDepthClamp = enabled;
+	}
+
+	override function setDepthBias( depthBias : Float, slopeScaledBias : Float ) {
+		var bias = hxd.Math.iclamp(Std.int(depthBias), -0x8000, 0x7FFF) & 0xFFFF;
+		var slope = haxe.io.FPHelper.floatToI32(slopeScaledBias) & 0xFFFF0000;
+		var biasBits = bias | slope;
+		if( biasBits == depthBiasBits )
+			return;
+		depthBiasBits = biasBits;
+		currentMaterialBits = -1;
 	}
 
 	override function setRenderZone(x:Int, y:Int, width:Int, height:Int) {
@@ -1119,6 +1163,7 @@ class DirectXDriver extends h3d.impl.Driver {
 			s.format = hxd.BufferFormat.make(format);
 			s.semanticNames = semanticNames;
 			shaders.set(shader.id, s);
+			shader.releaseData();
 		}
 		if( s == currentShader )
 			return false;
@@ -1331,12 +1376,13 @@ class DirectXDriver extends h3d.impl.Driver {
 				t.lastFrame = frame;
 
 				var view = t.t.view;
-				if( t.startingMip > 0 ) {
+				var startMip = t.startingMip - t.residentMip;
+				if( startMip > 0 ) {
 					if( t.t.views == null ) t.t.views = [];
-					view = t.t.views[t.startingMip];
+					view = t.t.views[startMip];
 					if( view == null ) {
-						view = makeTexView(t, t.t.res, t.startingMip);
-						t.t.views[t.startingMip] = view;
+						view = makeTexView(t, t.t.res, startMip);
+						t.t.views[startMip] = view;
 					}
 				}
 				if( view != state.resources[i] || t.t.depthView != null ) {

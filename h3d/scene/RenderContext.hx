@@ -1,11 +1,22 @@
 package h3d.scene;
 
+import h3d.mat.Texture;
+import h3d.col.Frustum;
+
 private class SharedGlobal {
 	public var gid : Int;
 	public var value : Dynamic;
 	public function new(gid, value) {
 		this.gid = gid;
 		this.value = value;
+	}
+}
+
+class View {
+	public var idx : Int;
+	public var frustum : Frustum;
+	public function new(idx) {
+		this.idx = idx;
 	}
 }
 
@@ -18,7 +29,10 @@ class RenderContext extends h3d.impl.RenderContext {
 	public var pbrLightPass : h3d.mat.Pass;
 	public var computingStatic : Bool;
 	public var computeVelocity : Bool;
+	public var enableTranslucency : Bool;
 	public var useReverseDepth : Bool;
+	public var renderResolutionWidth : Int;
+	public var renderResolutionHeight : Int;
 
 	public var lightSystem : h3d.scene.LightSystem;
 	public var extraShaders : hxsl.ShaderList;
@@ -27,8 +41,18 @@ class RenderContext extends h3d.impl.RenderContext {
 	public var wasContextLost : Bool;
 	public var cullingCollider : h3d.col.Collider;
 	public var forcedScreenRatio : Float = -1;
+	public var meshLodScale : Float = 1.0;
+
+	public var hzb : h3d.mat.Texture;
+
+	public var numViews : Int = 1;
+	public var currentView : View = new h3d.scene.View(0);
+
+	public var prevCamera : h3d.Camera;
+	public var prevWorldDelta : h3d.Vector;
 
 	@global("camera.view") var cameraView : h3d.Matrix;
+	@global("camera.invView") var cameraInvView : h3d.Matrix;
 	@global("camera.zNear") var cameraNear : Float;
 	@global("camera.zFar") var cameraFar : Float;
 	@global("camera.proj") var cameraProj : h3d.Matrix;
@@ -40,6 +64,8 @@ class RenderContext extends h3d.impl.RenderContext {
 	@global("camera.reverseDepth") var cameraReverseDepth : Bool;
 	@global("camera.viewProj") var cameraViewProj : h3d.Matrix;
 	@global("camera.inverseViewProj") var cameraInverseViewProj : h3d.Matrix;
+	@global("camera.prevView") var cameraPrevView : h3d.Matrix;
+	@global("camera.prevProj") var cameraPrevProj : h3d.Matrix;
 	@global("camera.previousViewProj") var cameraPreviousViewProj : h3d.Matrix;
 	@global("camera.jitterOffsets") var cameraJitterOffsets : h3d.Vector4;
 	@global("global.prevTime") var globalPrevTime : Float;
@@ -66,12 +92,31 @@ class RenderContext extends h3d.impl.RenderContext {
 	var cameraFrustumBuffer : h3d.Buffer = null;
 	var cameraFrustumUploaded : Bool = false;
 
+	public var streamingFeedback(default, null) : StreamingFeedback;
+	/**
+		The object being drawn, used to tell if the streamed textures it uses are visible.
+	**/
+	public var currentObject : Object;
+	/**
+		The frustum an object must intersect for its streamed textures to be visible : the camera frustum,
+		or the light frustum while a shadow map is drawn (see h3d.pass.Shadows).
+	**/
+	public var visibilityFrustum : Frustum;
+	var visibilityObject : Object;
+	var visibilityObjectFrustum : Frustum;
+	var objectVisible : Bool;
+	var visibilitySphere = new h3d.col.Sphere();
+
 	public function new(scene) {
 		super();
 		this.scene = scene;
 		camera = new h3d.Camera();
+		prevCamera = new h3d.Camera();
+		renderResolutionWidth = engine.width;
+		renderResolutionHeight = engine.height;
 		cachedShaderList = [];
 		cachedPassObjects = [];
+		passes = [];
 		initGlobals();
 		#if anti_aliasing
 		globalAntiAliasing = 0;
@@ -79,10 +124,12 @@ class RenderContext extends h3d.impl.RenderContext {
 	}
 
 	public function setCamera( cam : h3d.Camera ) {
+		prevCamera.load(camera);
 		camera.load(cam);
 		cameraReverseDepth = camera.reverseDepth = useReverseDepth;
 		camera.update();
 		cameraView = camera.mcam;
+		cameraInvView = camera.getInverseView();
 		cameraNear = camera.zNear;
 		cameraFar = camera.zFar;
 		cameraProj = camera.mproj;
@@ -91,12 +138,34 @@ class RenderContext extends h3d.impl.RenderContext {
 		if(cameraPrevPos == null)
 			cameraPrevPos = camera.pos.clone();
 		cameraProjDiag = new h3d.Vector4(camera.mproj._11,camera.mproj._22,camera.mproj._33,camera.mproj._44);
+		if ( cameraPrevView == null )
+			cameraPrevView = camera.mcam.clone();
+		if ( cameraPrevProj == null )
+			cameraPrevProj = camera.mproj.clone();
 		if ( cameraPreviousViewProj == null )
 			cameraPreviousViewProj = camera.m.clone();
 		if (cameraJitterOffsets == null)
 			cameraJitterOffsets = new h3d.Vector4( 0.0, 0.0, 0.0, 0.0 );
 		cameraViewProj = camera.m;
 		cameraInverseViewProj = camera.getInverseViewProj();
+		currentView.frustum = camera.frustum;
+		visibilityFrustum = camera.frustum;
+		visibilityObject = null;
+	}
+
+	public function setRenderResolution( width : Int, height : Int ) {
+		renderResolutionWidth = width;
+		renderResolutionHeight = height;
+		pixelSize = new h3d.Vector(2 / width, 2 / height);
+	}
+
+	public function updateNumViews( numViews : Int ) {
+		this.numViews = numViews;
+	}
+
+	public function setCurrentView( viewIdx : Int, viewFrustum : Frustum ) {
+		currentView.idx = viewIdx;
+		currentView.frustum = viewFrustum;
 	}
 
 	public function setupTarget() {
@@ -121,7 +190,7 @@ class RenderContext extends h3d.impl.RenderContext {
 
 	public function start() {
 		drawPass = null;
-		passes = [];
+		passes.resize(0);
 		lights = null;
 		cachedPos = 0;
 		visibleFlag = true;
@@ -131,10 +200,14 @@ class RenderContext extends h3d.impl.RenderContext {
 		frame++;
 		setCurrent();
 		engine = h3d.Engine.getCurrent();
+		setRenderResolution(engine.width, engine.height);
 		globalTime = time;
 		globalFrame = frame;
 		pixelSize = getCurrentPixelSize();
 		setCamera(scene.camera);
+		numViews = 1;
+		currentView.idx = 0;
+		if( streamingFeedback != null ) streamingFeedback.begin();
 	}
 
 	public inline function nextPass() {
@@ -191,6 +264,8 @@ class RenderContext extends h3d.impl.RenderContext {
 	public function computeDispatch( ?shader : hxsl.Shader, x = 1, y = 1, z = 1, barrier : Bool = true) {
 		if ( x <= 0 || y <= 0 || z <= 0 )
 			throw "Can't use zero or negative work groups count";
+		if ( x > 65535 || y > 65535 || z > 65535 )
+			throw "Thread group size can't exceed 65535";
 
 		var prev = h3d.impl.RenderContext.get();
 		if( prev != this )
@@ -205,16 +280,9 @@ class RenderContext extends h3d.impl.RenderContext {
 		for ( s in computeLink )
 			s.updateConstants(globals);
 		var rt = hxsl.Cache.get().link(computeLink, Compute);
-		// upload buffers
-		engine.driver.selectShader(rt);
-		var buf = shaderBuffers;
-		buf.grow(rt);
-		fillGlobals(buf, rt);
-		engine.uploadShaderBuffers(buf, Globals);
-		fillParams(buf, rt, computeLink, true);
-		engine.uploadInstanceShaderBuffers(buf);
-		engine.driver.computeDispatch(x,y,z, barrier);
-		@:privateAccess engine.dispatches++;
+		engine.selectShader(rt);
+		if( !engine.shaderFailed && h3d.impl.RenderError.guard(uploadComputeParams(rt), Params(rt)) )
+			engine.computeDispatch(x, y, z, barrier);
 		if ( computeLink == tmpComputeLink )
 			tmpComputeLink.s = null;
 		computeLink = null;
@@ -223,6 +291,15 @@ class RenderContext extends h3d.impl.RenderContext {
 			done();
 			if( prev != null ) prev.setCurrent();
 		}
+	}
+
+	function uploadComputeParams( rt : hxsl.RuntimeShader ) {
+		var buf = shaderBuffers;
+		buf.grow(rt);
+		fillGlobals(buf, rt);
+		engine.uploadShaderBuffers(buf, Globals);
+		fillParams(buf, rt, computeLink, true);
+		engine.uploadInstanceShaderBuffers(buf);
 	}
 
 	public function emitLight( l : Light ) {
@@ -262,17 +339,82 @@ class RenderContext extends h3d.impl.RenderContext {
 		return useReverseDepth ? 0.0 : 1.0;
 	}
 
-	public function selectTextureHandles(handles : Array<h3d.mat.TextureHandle>) {
+	public function selectTextureHandles(handles : Array<h3d.mat.TextureHandle>, markVisible = true) {
+		if( markVisible ) {
+			for( h in handles ) {
+				var t = h.texture;
+				if( t != null && t.flags.has(Streamed) ) t.markVisible();
+			}
+		}
 		engine.driver.selectTextureHandles(handles);
 	}
 
+	/**
+		Returns the GPU feedback of the streamed textures visibility, or null if unsupported.
+	**/
+	public function getStreamingFeedback() {
+		if( streamingFeedback == null && StreamingFeedback.ENABLED ) {
+			if( !engine.driver.hasFeature(Bindless) )
+				StreamingFeedback.ENABLED = false
+			else {
+				streamingFeedback = new StreamingFeedback();
+				streamingFeedback.begin();
+			}
+		}
+		return streamingFeedback;
+	}
+
+	public function selectBufferHandles(handles : Array<h3d.BufferHandle>) {
+		engine.driver.selectBufferHandles(handles);
+	}
+
 	public function uploadParams() {
+		currentObject = drawPass.obj;
 		fillParams(shaderBuffers, drawPass.shader, drawPass.shaders);
+		currentObject = null;
 		engine.uploadInstanceShaderBuffers(shaderBuffers);
+	}
+
+	override function markTextureVisible( t : Texture ) {
+		var obj = currentObject;
+		if( obj != null && visibilityFrustum != null ) {
+			if( obj != visibilityObject || visibilityFrustum != visibilityObjectFrustum ) {
+				visibilityObject = obj;
+				visibilityObjectFrustum = visibilityFrustum;
+				objectVisible = intersectsFrustum(obj, visibilityFrustum);
+			}
+			if( !objectVisible )
+				return;
+		}
+		t.markVisible();
+	}
+
+	function intersectsFrustum( obj : Object, frustum : Frustum ) {
+		var mesh = Std.downcast(obj, Mesh);
+		if( mesh == null || mesh.primitive == null )
+			return true;
+		var b = mesh.primitive.getBounds();
+		if( b == null || b.isEmpty() )
+			return true;
+		var m = @:privateAccess obj.absPos;
+		var cx = (b.xMin + b.xMax) * 0.5, cy = (b.yMin + b.yMax) * 0.5, cz = (b.zMin + b.zMax) * 0.5;
+		var sx = m._11 * m._11 + m._12 * m._12 + m._13 * m._13;
+		var sy = m._21 * m._21 + m._22 * m._22 + m._23 * m._23;
+		var sz = m._31 * m._31 + m._32 * m._32 + m._33 * m._33;
+		var scaleSq = sx > sy ? (sx > sz ? sx : sz) : (sy > sz ? sy : sz);
+		var dx = b.xMax - b.xMin, dy = b.yMax - b.yMin, dz = b.zMax - b.zMin;
+		var s = visibilitySphere;
+		s.x = cx * m._11 + cy * m._21 + cz * m._31 + m._41;
+		s.y = cx * m._12 + cy * m._22 + cz * m._32 + m._42;
+		s.z = cx * m._13 + cy * m._23 + cz * m._33 + m._43;
+		s.r = Math.sqrt((dx * dx + dy * dy + dz * dz) * 0.25 * scaleSq);
+		return frustum.hasSphere(s);
 	}
 
 	public function done() {
 		drawPass = null;
+		visibilityObject = null;
+		if( streamingFeedback != null ) streamingFeedback.end();
 		// move passes to pool, and erase data
 		var p = allocFirst;
 		while( p != null && p != allocPool ) {
@@ -293,20 +435,28 @@ class RenderContext extends h3d.impl.RenderContext {
 			c.s = null;
 			c.next = null;
 		}
-		passes = [];
+		passes.resize(0);
 		lights = null;
 
 		cameraFrustumUploaded = false;
 
 		cameraPrevPos.load(cameraPos);
+		cameraPrevView.load(cameraView);
+		cameraPrevProj.load(cameraProj);
 		cameraPreviousViewProj.load(cameraViewProj);
 		computeVelocity = false;
+		cameraJitterOffsets.set(0, 0, 0, 0);
+		prevWorldDelta = null;
 
 		clearCurrent();
 	}
 
 	override public function dispose() {
 		super.dispose();
+		if( streamingFeedback != null ) {
+			streamingFeedback.dispose();
+			streamingFeedback = null;
+		}
 		if ( cameraFrustumBuffer != null ) {
 			hxd.impl.Allocator.get().disposeBuffer( cameraFrustumBuffer );
 			cameraFrustumBuffer = null;

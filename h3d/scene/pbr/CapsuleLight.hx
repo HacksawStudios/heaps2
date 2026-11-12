@@ -13,7 +13,7 @@ class CapsuleLight extends Light {
 
 	public function new(?parent) {
 		pbr = new h3d.shader.pbr.Light.CapsuleLight();
-		shadows = new h3d.pass.CapsuleShadowMap(this, true);
+		shadows = new h3d.pass.CapsuleShadowMap(this);
 		super(pbr,parent);
 		range = 10;
 	}
@@ -28,13 +28,7 @@ class CapsuleLight extends Light {
 	}
 
 	function get_range() {
-		var minScale = 1.0;
-		var p = parent;
-		while (p != null) {
-			minScale *= hxd.Math.min(p.scaleX, hxd.Math.min(p.scaleY, p.scaleZ));
-			p = p.parent;
-		}
-		return scaleX * minScale;
+		return scaleX * getParentScale();
 	}
 
 	function updatePrim() {
@@ -47,6 +41,11 @@ class CapsuleLight extends Light {
 		setScale(v);
 		updatePrim();
 		return v;
+	}
+
+	override function getUnitlessIntensity() : Float {
+		var power = power * 10; // base scale
+		return power * power;
 	}
 
 	function set_length(v:Float) {
@@ -64,15 +63,14 @@ class CapsuleLight extends Light {
 
 		pbr.lightColor.load(_color);
 		var range = hxd.Math.max(range, 1e-10);
-		var power = power * 10; // base scale
-		pbr.lightColor.scale(power * power);
+		pbr.lightColor.scale(getIntensity());
 		pbr.lightPos.set(absPos.getPosition().x, absPos.getPosition().y, absPos.getPosition().z);
-		pbr.radius = radius;
+		pbr.radius = hxd.Math.min(radius, range);
 		pbr.halfLength = length * 0.5;
 		pbr.occlusionFactor = occlusionFactor;
 		pbr.left.load(absPos.front());
-		var d = range - radius;
-		pbr.invRange4 = 1 / (d * d * d * d);
+		pbr.invRange4 = 1 / (range * range * range * range);
+		pbr.inverseSquareFalloff = hasInverseSquareFalloff();
 	}
 
 	var s = new h3d.col.Sphere();

@@ -67,6 +67,12 @@ class System {
 	}
 
 	static function mainLoop() {
+		var engine = h3d.Engine.getCurrent();
+		if( engine != null && engine.ready ) {
+			engine.driver.upscaling.lowLatencySleep();
+			engine.driver.upscaling.latencyMarker(SimulationStart);
+		}
+
 		// process events
 		#if usesys
 		haxe.System.emitEvents(@:privateAccess hxd.Window.dispatchEvent);
@@ -154,7 +160,7 @@ class System {
 				hl.Api.setErrorHandler(reportError); // set exception trap
 			#end
 				#if ( haxe_ver >= 5 )
-				mainThread.events.loopOnce();
+				haxe.EventLoop.getThreadLoop(mainThread).loopOnce();
 				#elseif ( target.threaded && (haxe_ver >= 4.2) )
 				// Due to how 4.2+ timers work, instead of MainLoop, thread events have to be updated.
 				// Unsafe events rely on internal implementation of EventLoop, but utilize the recycling feature
@@ -178,6 +184,9 @@ class System {
 			if( check_reload() ) onReload();
 			#end
 		}
+		var engine = h3d.Engine.getCurrent();
+		if( engine != null )
+			engine.driver.upscaling.dispose();
 		Sys.exit(0);
 	}
 
@@ -195,7 +204,7 @@ class System {
 	public dynamic static function reportError( e : Dynamic ) {
 		#if (haxe_ver >= 4.1)
 		var exc = Std.downcast(e, haxe.Exception);
-		var stack = haxe.CallStack.toString(exc != null ? exc.stack : haxe.CallStack.exceptionStack());
+		var stack = haxe.CallStack.toString(exc != null ? exc.stack : haxe.CallStack.exceptionStack(true));
 		#else
 		var stack = haxe.CallStack.toString(haxe.CallStack.exceptionStack());
 		#end
@@ -362,6 +371,8 @@ class System {
 	public static function getDeviceName() : String {
 		#if usesys
 		return haxe.System.name;
+		#elseif hlvk
+		return "PC/" + vk.Vk.getDeviceName();
 		#elseif hlsdl
 		return "PC/" + sdl.Sdl.getDevices()[0];
 		#elseif (hldx && dx12)

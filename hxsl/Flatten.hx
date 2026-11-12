@@ -28,6 +28,7 @@ class Flatten {
 	var varMap : Map<TVar,Alloc>;
 	var textureFormats : Array<{ dim : TexDimension, arr : Bool, rw : Int }>;
 	public var allocData : Map< TVar, Array<Alloc> >;
+	public var hasBindless : Bool;
 
 	var mapExprFun : TExpr -> TExpr;
 
@@ -42,6 +43,7 @@ class Flatten {
 		textureFormats = [];
 		varMap = new Map();
 		allocData = new Map();
+		hasBindless = false;
 		for( v in s.vars )
 			gatherVar(v);
 		var prefix = switch( kind ) {
@@ -141,8 +143,13 @@ class Flatten {
 			var a = varMap.get(v);
 			if( a == null )
 				e
-			else
-				access(a, v.type, e.p, AIndex(a));
+			else {
+				var acc = access(a, v.type, e.p, AIndex(a));
+				if( v.type == TBool && v.kind == Param && !Tools.isConst(v) )
+					{ e: TParenthesis({ e : TBinop(OpNotEq, acc, { e : TConst(CFloat(0)), t : TFloat, p : e.p }), t : TBool, p : e.p }), t : TBool, p : e.p }
+				else
+					acc;
+			}
 		case TArray( { e : TVar(v), p : vp }, eindex):
 			var a = varMap.get(v);
 			if( a == null || (!v.type.match(TBuffer(_)) && eindex.e.match(TConst(CInt(_)))) )
@@ -234,6 +241,9 @@ class Flatten {
 				]), t : e.t, p : e.p}
 			default : throw "assert";
 			}
+		case TCall({ e : TGlobal(ResolveSampler|ResolveBuffer) }, _):
+			hasBindless = true;
+			e.map(mapExprFun);
 		default:
 			e.map(mapExprFun);
 		};
@@ -316,7 +326,7 @@ class Flatten {
 				e = { e : TSwiz(e, sw), t : t, p : pos };
 			}
 			switch( t ) {
-			case TInt:
+			case TInt, TBufferHandle:
 				e.t = TFloat;
 				e = floatBitsToInt(e);
 			case TVec(size,VInt):
@@ -521,7 +531,7 @@ class Flatten {
 
 	function varSize( v : Type, t : VecType ) {
 		return switch( v ) {
-		case TFloat, TInt if( t == VFloat ): 1;
+		case TFloat, TInt, TBool if( t == VFloat ): 1;
 		case TVec(n, t2) if( t == t2 ): n;
 		case TBytes(n): n;
 		case TMat4 if( t == VFloat ): 16;
@@ -533,6 +543,7 @@ class Flatten {
 				size += varSize(v.type, t);
 			size;
 		case TTextureHandle: 2;
+		case TBufferHandle: 1;
 		default:
 			throw v.toString() + " size unknown for type " + t;
 		}

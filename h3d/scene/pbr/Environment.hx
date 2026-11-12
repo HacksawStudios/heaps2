@@ -286,7 +286,7 @@ class Environment {
 		pass.shader.threshold = threshold;
 		for( i in 0...6 ) {
 			engine.pushTarget(env,i);
-			pass.shader.faceMatrix = getCubeMatrix(i);
+			pass.shader.faceMatrix = h3d.mat.Texture.getCubeFaceMatrix(i);
 			pass.render();
 			engine.popTarget();
 		}
@@ -300,46 +300,31 @@ class Environment {
 		// do not set to null as their might be candidate for realloc
 	}
 
+	function createDiffuseTexture() : h3d.mat.Texture {
+		var diffuse = new h3d.mat.Texture(diffSize, diffSize, [Cube, Target], DEFAULT_FORMAT);
+		diffuse.setName("irradDiffuse");
+		diffuse.preventAutoDispose();
+		return diffuse;
+	}
+
+	function createSpecularTexture() : h3d.mat.Texture {
+		var specular = new h3d.mat.Texture(specSize, specSize, [Cube, Target, MipMapped, ManualMipMapGen], DEFAULT_FORMAT);
+		specular.setName("irradSpecular");
+		specular.mipMap = Linear;
+		specular.preventAutoDispose();
+		return specular;
+	}
+
 	function createTextures() {
-		if( diffuse == null ) {
-			diffuse = new h3d.mat.Texture(diffSize, diffSize, [Cube, Target], DEFAULT_FORMAT);
-			diffuse.setName("irradDiffuse");
-			diffuse.preventAutoDispose();
-		}
-		if( specular == null ) {
-			specular = new h3d.mat.Texture(specSize, specSize, [Cube, Target, MipMapped, ManualMipMapGen], DEFAULT_FORMAT);
-			specular.setName("irradSpecular");
-			specular.mipMap = Linear;
-			specular.preventAutoDispose();
-		}
+		if( diffuse == null )
+			diffuse = createDiffuseTexture();
+		if( specular == null )
+			specular = createSpecularTexture();
 	}
 
 	public function compute() {
 		createTextures();
-		computeIrradiance();
-	}
-
-	static function getCubeMatrix( face : Int ) {
-		return h3d.Matrix.L(switch( face ) {
-			case 0: [0,0,-1,0,
-					 0,-1,0,0,
-					 1,0,0,0];
-			case 1: [0,0,1,0,
-					 0,-1,0,0,
-					-1,0,0,0];
-			case 2: [1,0,0,0,
-					 0,0,1,0,
-					 0,1,0,0];
-			case 3: [1,0,0,0,
-					 0,0,-1,0,
-					 0,-1,0,0];
-			case 4: [1,0,0,0,
-					 0,-1,0,0,
-					 0,0,1,0];
-			default: [-1,0,0,0,
-					   0,-1,0,0,
-					   0,0,-1,0];
-		});
+		computeIrradiance(diffuse, specular, env);
 	}
 
 	static function computeIrradLut( t : h3d.mat.Texture ) {
@@ -360,7 +345,7 @@ class Environment {
 		return mipLevels;
 	}
 
-	function computeIrradiance() {
+	function computeIrradiance(diffuse : h3d.mat.Texture, specular : h3d.mat.Texture, env : h3d.mat.Texture) {
 
 		var screen = new h3d.pass.ScreenFx(new IrradShader());
 		screen.shader.samplesBits = sampleBits;
@@ -371,7 +356,7 @@ class Environment {
 		var engine = h3d.Engine.getCurrent();
 
 		for( i in 0...6 ) {
-			screen.shader.faceMatrix = getCubeMatrix(i);
+			screen.shader.faceMatrix = h3d.mat.Texture.getCubeFaceMatrix(i);
 			engine.pushTarget(diffuse, i);
 			screen.render();
 			engine.popTarget();
@@ -383,7 +368,7 @@ class Environment {
 		specLevels = mipLevels - ignoredSpecLevels;
 
 		for( i in 0...6 ) {
-			screen.shader.faceMatrix = getCubeMatrix(i);
+			screen.shader.faceMatrix = h3d.mat.Texture.getCubeFaceMatrix(i);
 			for( j in 0... mipLevels ) {
 				var size = specular.width >> j;
 				screen.shader.cubeSize = size;

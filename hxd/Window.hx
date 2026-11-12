@@ -13,6 +13,8 @@ class Window {
 	var resizeEvents : List<Void -> Void>;
 	var eventTargets : List<Event -> Void>;
 
+	public var x(get, never) : Int;
+	public var y(get, never) : Int;
 	public var width(get, never) : Int;
 	public var height(get, never) : Int;
 	public var mouseX(get, never) : Int;
@@ -53,6 +55,12 @@ class Window {
 	**/
 	public dynamic function onMouseModeChange( from : MouseMode, to : MouseMode ) : Null<MouseMode> {
 		return null;
+	}
+
+	public function setIcon(icon: hxd.BitmapData) : Void {
+	}
+
+	public function setPosition(x: Int, y: Int) {
 	}
 
 	public function event( e : hxd.Event ) : Void {
@@ -114,7 +122,7 @@ class Window {
 	public function setCursorPos( x : Int, y : Int, emitEvent : Bool = false ) : Void {
 		throw "Not implemented";
 	}
-	
+
 	public function setCurrent() {
 	}
 
@@ -122,6 +130,14 @@ class Window {
 	public static function getInstance() : Window {
 		if( inst == null ) inst = new Window();
 		return inst;
+	}
+
+	function get_x() : Int {
+		return 0;
+	}
+
+	function get_y() : Int {
+		return 0;
 	}
 
 	function get_mouseX() : Int {
@@ -183,5 +199,8 @@ class Window {
 	}
 	function set_title( t : String ) : String {
 		return t;
+	}
+
+	public function captureMouseEvents(enable: Bool) : Void {
 	}
 }

@@ -163,9 +163,10 @@ class BlendSpace2D extends h3d.anim.Animation {
 				outMatrix.recomposeMatrix(outMatrix);
 			}
 
-			@:privateAccess if( object.targetSkin != null )
+			@:privateAccess if( object.targetSkin != null ) {
 				object.targetSkin.jointsData[object.targetJoint].currentRelPos = outMatrix;
-			else if( object.targetObject != null )
+				object.targetSkin.jointsUpdated = true;
+			} else if( object.targetObject != null )
 				object.targetObject.defaultTransform = outMatrix;
 		}
 	}
@@ -315,7 +316,7 @@ class BlendSpace2D extends h3d.anim.Animation {
 		for (point in points) {
 			xMin = hxd.Math.min(point.x, xMin);
 			xMax = hxd.Math.max(point.x, xMax);
-			yMin = hxd.Math.min(point.y, xMin);
+			yMin = hxd.Math.min(point.y, yMin);
 			yMax = hxd.Math.max(point.y, yMax);
 		}
 

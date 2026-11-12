@@ -148,7 +148,11 @@ enum FontType {
 		@param alphaCutoff The distance value that is considered to be the edge. Usually should be 0.5.
 		@param smoothing The smoothing of edge. Lower value lead to sharper edges. Value of -1 sets it to automatic.
 	**/
-	SignedDistanceField(channel:SDFChannel, alphaCutoff:Float, smoothing:Float);
+	SignedDistanceField(channel : SDFChannel, alphaCutoff : Float, smoothing : Float);
+	/**
+		A font group is a virtual font that contains one or several sub fonts that can be selected with h2d.Text.resolveSubFont.
+	**/
+	FontGroup;
 }
 
 /**
@@ -208,6 +212,12 @@ class Font {
 		SDF Field type used when generating.
 	**/
 	public var fieldType:String;
+
+	/**
+		Subfonts will be selected when assigned with the `h2d.Text.resolveSubFont` method.
+	**/
+	public var subFonts : Array<Font>;
+
 	var glyphs : Map<Int,FontChar>;
 	var nullChar : FontChar;
 	var defaultChar : FontChar;

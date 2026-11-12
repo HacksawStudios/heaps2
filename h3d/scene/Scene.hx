@@ -1,5 +1,15 @@
 package h3d.scene;
 
+#if hlphysics
+enum abstract CollisionGroup(Int) from Int to Int {
+	var Invisible = 1;
+	var AnyMatch = 2;
+	var BestMatch = 4;
+
+	@:op(a | b) static function or( a : CollisionGroup, b : CollisionGroup ) : CollisionGroup;
+}
+#end
+
 /**
 	h3d.scene.Scene is the root class for a 3D scene. All root objects are added to it before being drawn on screen.
 **/
@@ -47,6 +57,13 @@ class Scene extends Object implements h3d.IDrawable implements hxd.SceneEvents.I
 	public var checkPasses = true;
 	#end
 
+	#if hlphysics
+	var interactiveWorld : physics.collision.PhysicsWorld;
+	var interactiveInfos : Map<Interactive, Array<{ id : Int, follow : Null<h3d.scene.Object>, lastTrans : Matrix }>>;
+	var shapeCache : Map<h3d.col.Collider, physics.collision.shapes.Shape>;
+	var lastSyncFrame = -1;
+	#end
+
 	/**
 		Create a new scene. A default 3D scene is already available in `hxd.App.s3d`
 	**/
@@ -64,6 +81,11 @@ class Scene extends Object implements h3d.IDrawable implements hxd.SceneEvents.I
 		ctx = new RenderContext(this);
 		if( createRenderer ) renderer = h3d.mat.MaterialSetup.current.createRenderer();
 		if( createLightSystem ) lightSystem = h3d.mat.MaterialSetup.current.createLightSystem();
+		#if hlphysics
+		interactiveWorld = new physics.collision.PhysicsWorld(100);
+		interactiveInfos = new Map();
+		shapeCache = new Map();
+		#end
 	}
 
 	@:noCompletion @:dox(hide) public function setEvents(events) {
@@ -103,14 +125,6 @@ class Scene extends Object implements h3d.IDrawable implements hxd.SceneEvents.I
 		return r;
 	}
 
-	function sortHitPointByCameraDistance( i1 : Interactive, i2 : Interactive ) {
-		var z1 = i1.hitPoint.w;
-		var z2 = i2.hitPoint.w;
-		if( z1 > z2 )
-			return -1;
-		return 1;
-	}
-
 	@:dox(hide) @:noCompletion
 	public function dispatchEvent( event : hxd.Event, to : hxd.SceneEvents.Interactive ) {
 		var i : Interactive = cast to;
@@ -129,7 +143,7 @@ class Scene extends Object implements h3d.IDrawable implements hxd.SceneEvents.I
 	}
 
 	@:dox(hide) @:noCompletion
-	public function handleEvent( event : hxd.Event, last : hxd.SceneEvents.Interactive ) {
+	public function handleEvent( event : hxd.Event, last : hxd.SceneEvents.Interactive ) : Null<Interactive> {
 
 		if( interactives.length == 0 )
 			return null;
@@ -155,85 +169,12 @@ class Scene extends Object implements h3d.IDrawable implements hxd.SceneEvents.I
 				r.py += r.ly * interactiveOffset;
 				r.pz += r.lz * interactiveOffset;
 			}
-			var saveR = r.clone();
-			var priority = 0x80000000;
-
-			for( i in interactives ) {
-
-				if( i.priority < priority ) continue;
-
-				var p : h3d.scene.Object = i;
-				while( p != null && p.visible )
-					p = p.parent;
-				if( p != null ) continue;
-
-				if( !i.isAbsoluteShape ) {
-					var minv = i.getInvPos();
-					r.transform(minv);
-				}
-
-				// check for NaN
-				if( r.lx != r.lx ) {
-					r.load(saveR);
-					continue;
-				}
-
-				var hit = i.shape.rayIntersection(r, i.bestMatch);
-				if( hit < 0 ) {
-					r.load(saveR);
-					continue;
-				}
-
-				var hitPoint = r.getPoint(hit);
-				r.load(saveR);
-
-				i.hitPoint.x = hitPoint.x;
-				i.hitPoint.y = hitPoint.y;
-				i.hitPoint.z = hitPoint.z;
-
-				if( i.priority > priority ) {
-					while( hitInteractives.length > 0 ) hitInteractives.pop();
-					priority = i.priority;
-				}
-
-				hitInteractives.push(i);
-			}
-
+			var hits = rayCastEventTargets(r);
+			hitInteractives = [for( h in hits ) h.i];
 			if( hitInteractives.length == 0 )
 				return null;
-
-
-			if( hitInteractives.length > 1 ) {
-				for( i in hitInteractives ) {
-					var m = i.invPos;
-					var wfactor = 0.;
-
-					// adjust result with better precision
-					if( i.preciseShape != null || !i.bestMatch ) {
-						if( !i.isAbsoluteShape )
-							r.transform(m);
-						var hit = (i.preciseShape ?? i.shape).rayIntersection(r, true);
-						if( hit > 0 ) {
-							var hitPoint = r.getPoint(hit);
-							i.hitPoint.x = hitPoint.x;
-							i.hitPoint.y = hitPoint.y;
-							i.hitPoint.z = hitPoint.z;
-						} else
-							wfactor = 1.;
-						r.load(saveR);
-					}
-
-					var p = i.hitPoint.clone();
-					p.w = 1;
-					if( !i.isAbsoluteShape )
-						p.transform3x4(i.absPos);
-					p.project(camera.m);
-					i.hitPoint.w = p.z + wfactor;
-				}
-				hitInteractives.sort(sortHitPointByCameraDistance);
-			}
-
-			hitInteractives.unshift(null);
+			hitInteractives.push(null);
+			hitInteractives.reverse();
 		}
 
 		while( hitInteractives.length > 0 ) {
@@ -263,6 +204,203 @@ class Scene extends Object implements h3d.IDrawable implements hxd.SceneEvents.I
 		return null;
 	}
 
+	public function syncEventTargets() {
+		#if hlphysics
+		if( lastSyncFrame == hxd.Timer.frameCount )
+			return;
+		lastSyncFrame = hxd.Timer.frameCount;
+		var tmpStartMat = new Matrix();
+		var tmpMat = new Matrix();
+		var tmpScale = new physics.math.Vec3();
+		for( i in interactives ) {
+			if( i.shape == null )
+				continue;
+			var infos = interactiveInfos.get(i);
+			if( infos == null ) {
+				infos = [];
+				for( elt in physics.collision.shapes.Shape.listFromHeaps(i.shape, null, shapeCache) ) {
+					var body = new physics.collision.Body(elt.shape);
+					body.setMotionType(Kinematic);
+					body.userData = i;
+					var bodyId = interactiveWorld.addBody(body);
+					infos.push({ id : bodyId, follow : elt.follow, lastTrans : Matrix.I() });
+				}
+				interactiveInfos.set(i, infos);
+			}
+			var p : h3d.scene.Object = i;
+			while( p != null && p.visible )
+				p = p.parent;
+			var visible = p == null;
+			var collisionGroup = visible ? (i.bestMatch ? CollisionGroup.BestMatch : CollisionGroup.AnyMatch) : CollisionGroup.Invisible;
+			if( visible ) {
+				if( i.isAbsoluteShape )
+					tmpStartMat.identity();
+				else
+					tmpStartMat.load(i.getAbsPos());
+			}
+			for( info in infos ) {
+				var body = interactiveWorld.getBody(info.id);
+				body.collisionGroup = collisionGroup;
+				if( !visible )
+					continue;
+				tmpMat.load(tmpStartMat);
+				var follow = info.follow;
+				if( follow != null ) {
+					var matF = follow.getAbsPos();
+					tmpMat.multiply3x4inline(matF, tmpMat);
+				}
+				if( tmpMat.equal(info.lastTrans) )
+					continue;
+				var scale = tmpMat.getScale();
+				tmpScale.set(scale.x, scale.y, scale.z);
+				if( physics.math.ScaleHelper.isNearZero(tmpScale) ) {
+					body.collisionGroup = CollisionGroup.Invisible;
+					continue;
+				}
+				info.lastTrans.load(tmpMat);
+				var pos = tmpMat.getPosition();
+				var rot = tmpMat.getEulerAngles();
+				body.setPosition(pos.x, pos.y, pos.z);
+				body.setRotation(rot.x, rot.y, rot.z);
+				body.setScale(scale.x, scale.y, scale.z);
+				interactiveWorld.updateBody(info.id);
+			}
+		}
+		#end
+	}
+
+	public function rayCastEventTargets( r : h3d.col.Ray ) : Array<{ i : Interactive, distance : Float }> {
+		var hits : Array<Interactive> = [];
+
+		#if hlphysics
+		syncEventTargets();
+		var saveR = physics.collision.Ray.fromHeaps(r);
+		var priority = 0x80000000;
+		var allHits = [];
+		var bestHits : Map<Interactive, Float> = [];
+		function onHit( hit : physics.collision.HitResult, bodyId ) {
+			var body = interactiveWorld.getBody(bodyId);
+			var i : Interactive = body.userData;
+			if( i.priority > priority )
+				priority = i.priority;
+			var previous = bestHits.get(i);
+			if( previous != null && hit.fraction >= previous ) {
+				return true;
+			}
+			bestHits.set(i, hit.fraction);
+			var pos = hit.position.toHeaps();
+			if( !i.isAbsoluteShape )
+				pos.transform(i.getInvPos());
+			i.hitPoint.x = pos.x;
+			i.hitPoint.y = pos.y;
+			i.hitPoint.z = pos.z;
+			i.hitPoint.w = hit.fraction;
+			if( !allHits.contains(i) )
+				allHits.push(i);
+			return true;
+		}
+		interactiveWorld.raycast(saveR, onHit, physics.math.Math.SCALAR_MAX, CollisionGroup.AnyMatch, AnyPerBody);
+		interactiveWorld.raycast(saveR, onHit, physics.math.Math.SCALAR_MAX, CollisionGroup.BestMatch, ClosestPerBody);
+		for( i in allHits ) {
+			if( i.priority < priority )
+				continue;
+			hits.push(i);
+		}
+		#else
+		var saveR = r.clone();
+		var priority = 0x80000000;
+
+		for( i in interactives ) {
+
+			if( i.priority < priority ) continue;
+
+			var p : h3d.scene.Object = i;
+			while( p != null && p.visible )
+				p = p.parent;
+			if( p != null ) continue;
+
+			if( !i.isAbsoluteShape ) {
+				var minv = i.getInvPos();
+				r.transform(minv);
+			}
+
+			// check for NaN
+			if( r.lx != r.lx ) {
+				r.load(saveR);
+				continue;
+			}
+
+			var collider = Std.downcast(i.shape, h3d.col.Collider.OptimizedCollider);
+			if( collider != null ) collider.checkInside = true;
+			var hit = i.shape.rayIntersection(r, i.bestMatch);
+			if( collider != null ) collider.checkInside = false;
+			if( hit < 0 ) {
+				r.load(saveR);
+				continue;
+			}
+
+			var hitPoint = r.getPoint(hit);
+			r.load(saveR);
+
+			i.hitPoint.x = hitPoint.x;
+			i.hitPoint.y = hitPoint.y;
+			i.hitPoint.z = hitPoint.z;
+
+			if( i.priority > priority ) {
+				while( hits.length > 0 ) hits.pop();
+				priority = i.priority;
+			}
+
+			hits.push(i);
+		}
+
+		for( i in hits ) {
+			var m = i.invPos;
+			var wfactor = 0.;
+
+			// adjust result with better precision
+			if( i.preciseShape != null || !i.bestMatch ) {
+				if( !i.isAbsoluteShape )
+					r.transform(m);
+				var hit = (i.preciseShape ?? i.shape).rayIntersection(r, true);
+				if( hit > 0 ) {
+					var hitPoint = r.getPoint(hit);
+					i.hitPoint.x = hitPoint.x;
+					i.hitPoint.y = hitPoint.y;
+					i.hitPoint.z = hitPoint.z;
+				} else
+					wfactor = hxd.Math.POSITIVE_INFINITY;
+				r.load(saveR);
+			}
+
+			var p = i.hitPoint.clone();
+			p.w = 1;
+			if( !i.isAbsoluteShape )
+				p.transform3x4(i.absPos);
+			i.hitPoint.w = camera.pos.distance(new h3d.Vector(p.x, p.y, p.z)) + wfactor;
+		}
+		#end
+
+		if( hits.length > 1 )
+			hits.sort((i1, i2) -> Reflect.compare(i1.hitPoint.w, i2.hitPoint.w));
+		return [for( i in hits ) { i : i, distance : i.hitPoint.w }];
+	}
+
+	#if hlphysics
+	public function getEventTargetsInFrustum( shape : physics.collision.shapes.FrustumShape ) : Array<Interactive> {
+		var hits = [];
+		syncEventTargets();
+		interactiveWorld.overlapFrustum(shape, physics.math.Vec3.one(), physics.math.Mat.identity(), (bodyId) -> {
+			var body = interactiveWorld.getBody(bodyId);
+			var interactive : Interactive = body.userData;
+			if( !hits.contains(interactive) )
+				hits.push(interactive);
+			return true;
+		}, CollisionGroup.AnyMatch | CollisionGroup.BestMatch);
+		return hits;
+	}
+	#end
+
 	override function clone( ?o : Object ) {
 		var s = o == null ? new Scene() : cast o;
 		s.camera = camera.clone();
@@ -281,6 +419,13 @@ class Scene extends Object implements h3d.IDrawable implements hxd.SceneEvents.I
 			renderer.dispose();
 			renderer = new Renderer();
 		}
+		#if hlphysics
+		if( interactiveWorld != null ) {
+			interactiveWorld.dispose();
+			interactiveWorld = null;
+			shapeCache = null;
+		}
+		#end
 	}
 
 	@:allow(h3d)
@@ -294,6 +439,14 @@ class Scene extends Object implements h3d.IDrawable implements hxd.SceneEvents.I
 		if( interactives.remove(i) ) {
 			if( events != null ) @:privateAccess events.onRemove(i);
 			hitInteractives.remove(i);
+			#if hlphysics
+			var infos = interactiveInfos.get(i);
+			if( infos != null ) {
+				interactiveInfos.remove(i);
+				for( info in infos )
+					interactiveWorld.removeBody(info.id);
+			}
+			#end
 		}
 	}
 
@@ -341,6 +494,7 @@ class Scene extends Object implements h3d.IDrawable implements hxd.SceneEvents.I
 		ctx.wasContextLost = true;
 	}
 
+	var tmpPasses = [];
 	/**
 		Render the scene on screen. Internal usage only.
 	**/
@@ -378,7 +532,7 @@ class Scene extends Object implements h3d.IDrawable implements hxd.SceneEvents.I
 		ctx.engine.driver.endEvent();
 		#if sceneprof h3d.impl.SceneProf.end(); #end
 
-		var passes = [];
+		tmpPasses.resize(0);
 		var passIndex = -1;
 		for ( passId in 0...ctx.passes.length ) {
 			var curPass = ctx.passes[passId];
@@ -391,7 +545,7 @@ class Scene extends Object implements h3d.IDrawable implements hxd.SceneEvents.I
 			}
 			pobjs.name = curPass.pass.name;
 			pobjs.passes.init(curPass);
-			passes.push(pobjs);
+			tmpPasses.push(pobjs);
 		}
 
 		// send to rendered
@@ -399,12 +553,12 @@ class Scene extends Object implements h3d.IDrawable implements hxd.SceneEvents.I
 			ctx.lightSystem = lightSystem;
 			lightSystem.initLights(ctx);
 		}
-		renderer.process(passes);
+		renderer.process(tmpPasses);
 
 		// check that passes have been rendered
-		#if (debug && !editor)
+		#if (debug && !editor && !editor_hl)
 		if( !ctx.computingStatic && checkPasses)
-			for( p in passes )
+			for( p in tmpPasses )
 				if( !p.rendered )
 					trace("Pass " + p.name+" has not been rendered : don't know how to handle.");
 		#end
@@ -419,6 +573,7 @@ class Scene extends Object implements h3d.IDrawable implements hxd.SceneEvents.I
 			p.name = null;
 			p.passes.init(null);
 		}
+		tmpPasses.resize(0);
 	}
 
 	public dynamic function mark(name : String) {

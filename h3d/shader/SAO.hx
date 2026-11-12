@@ -21,6 +21,10 @@ class SAO extends ScreenShader {
 		@const var ORTHO : Bool = false;
 
 		@ignore @param var depthTexture : Channel;
+		@ignore @param var depthPyramid : Sampler2D;
+		@param var depthPyramidMaxLod : Float;
+		@param var depthPyramidLodBias : Float;
+		@param var depthHeight : Float;
 		@ignore @param var normalTexture : Channel3;
 		@param var noiseTexture : Sampler2D;
 		@param var noiseScale : Vec2;
@@ -49,7 +53,12 @@ class SAO extends ScreenShader {
 
 			var unitOffset = vec2(cos(angle), sin(angle));
 			var targetUV = uv + radiusSS * alpha * unitOffset * screenRatio;
-			var Q = getPosition(targetUV);
+			var Q : Vec3;
+			var mip = floor(log2(radiusSS * alpha * depthHeight)) - depthPyramidLodBias;
+			if( mip >= 1.0 )
+				Q = getPyramidPosition(targetUV, min(mip - 1.0, depthPyramidMaxLod));
+			else
+				Q = getPosition(targetUV);
 			var radius = sampleRadius;
 			if (USE_SCALABLE_BIAS) {
 				var vQ = Q * cameraView;
@@ -68,11 +77,17 @@ class SAO extends ScreenShader {
 		}
 
 		function getPosition( uv : Vec2 ) : Vec3 {
-			var depth = depthTexture.get(uv);
+			var depth = depthTexture.getLod(uv, 0.0);
 			var uv2 = uvToScreen(uv);
 			var temp = vec4(uv2, depth, 1) * cameraInverseViewProj;
 			var originWS = temp.xyz / temp.w;
 			return originWS;
+		}
+
+		function getPyramidPosition( uv : Vec2, lod : Float ) : Vec3 {
+			var depth = depthPyramid.getLod(uv, lod).x;
+			var temp = vec4(uvToScreen(uv), depth, 1) * cameraInverseViewProj;
+			return temp.xyz / temp.w;
 		}
 
 		function fragment() {
@@ -91,26 +106,31 @@ class SAO extends ScreenShader {
 			var sampleNoise = noiseTexture.get(noiseUv).x;
 			var randomPatternRotationAngle = 2.0 * PI * sampleNoise;
 
-			// change from WS to DepthUV space
-			var radiusSS = 0.0;
-			if ( ORTHO )
-				radiusSS = sampleRadius * invOrthoHeight;
-			else
-				radiusSS = (sampleRadius * fovTan) / (origin * cameraView).z;
-
-			for( i in 0...numSamples )
-				occlusion += sampleAO(vUV, origin, normal, radiusSS, i, randomPatternRotationAngle);
-
-			occlusion = 1.0 - occlusion / float(numSamples);
-			occlusion = pow(occlusion, 1.0 + intensity).saturate();
-
+			var fadeWeight = 1.0;
 			if ( USE_START_FADE || USE_FADE ) {
 				var dist = distance(origin, camera.position);
 				if ( USE_START_FADE )
-					occlusion = mix(1.0, occlusion, saturate((dist - startFadeStart) / (startFadeEnd - startFadeStart)));
+					fadeWeight *= saturate((dist - startFadeStart) / (startFadeEnd - startFadeStart));
 				if ( USE_FADE )
-					occlusion = mix(occlusion, 1.0, saturate((dist - fadeStart) / (fadeEnd - fadeStart)));
+					fadeWeight *= 1.0 - saturate((dist - fadeStart) / (fadeEnd - fadeStart));
 			}
+
+			if ( fadeWeight > 0.0 ) {
+				// change from WS to DepthUV space
+				var radiusSS = 0.0;
+				if ( ORTHO )
+					radiusSS = sampleRadius * invOrthoHeight;
+				else
+					radiusSS = (sampleRadius * fovTan) / (origin * cameraView).z;
+
+				for( i in 0...numSamples )
+					occlusion += sampleAO(vUV, origin, normal, radiusSS, i, randomPatternRotationAngle);
+
+				occlusion = 1.0 - occlusion / float(numSamples);
+				occlusion = pow(occlusion, 1.0 + intensity).saturate();
+				occlusion = mix(1.0, occlusion, fadeWeight);
+			} else
+				occlusion = 1.0;
 
 			output.color = vec4(occlusion.xxx, 1.);
 		}
@@ -126,6 +146,23 @@ class SAO extends ScreenShader {
 		noiseScale.set(10, 10);
 		noiseTexture = h3d.mat.Texture.genNoise(128);
 		noiseTexture.wrap = Repeat;
+		depthPyramidLodBias = 3;
+	}
+
+}
+
+class SAODepthPyramid extends ScreenShader {
+
+	static var SRC = {
+		@param var source : Sampler2D;
+		@param var sourceSize : Vec2;
+
+		function fragment() {
+			var p = floor(fragCoord.xy);
+			var pick = vec2(1.0) - mod(p.yx, vec2(2.0));
+			var src = min(p * 2.0 + pick, sourceSize - 1.0);
+			output.color = vec4(source.fetch(ivec2(src)).xxx, 1.0);
+		}
 	}
 
 }

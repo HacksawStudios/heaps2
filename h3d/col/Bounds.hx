@@ -42,7 +42,7 @@ class Bounds extends Collider {
 		return dd + rr - p.d*2;
 	}
 
-	public function rayIntersection( r : Ray, bestMatch : Bool ) : Float {
+	public inline function rayIntersection( r : Ray, bestMatch : Bool ) : Float {
 		var minTx = (xMin - r.px) / r.lx;
 		var minTy = (yMin - r.py) / r.ly;
 		var minTz = (zMin - r.pz) / r.lz;
@@ -60,9 +60,7 @@ class Bounds extends Collider {
 		var minmax = Math.min( Math.min(realMaxTx, realMaxTy), realMaxTz);
 		var maxmin = Math.max( Math.max(realMinTx, realMinTy), realMinTz);
 
-		if(minmax < maxmin)	return -1;
-
-		return maxmin;
+		return if(minmax < maxmin) -1 else maxmin;
 	}
 
 	/**
@@ -391,6 +389,7 @@ class Bounds extends Collider {
 	}
 
 	public inline function getBoundingSphereRadius() {
+		if(isEmpty()) return 0.0;
 		var dx = xMax - xMin;
 		var dy = yMax - yMin;
 		var dz = zMax - zMin;
@@ -403,9 +402,15 @@ class Bounds extends Collider {
 		return s.r + offsetMagnitude;
 	}
 
-	public function closestPoint( p : h3d.col.Point ) {
-		throw "Not implemented";
-		return new h3d.col.Point();
+	public inline function closestPoint( p : h3d.col.Point ) {
+		var inx = hxd.Math.clamp(p.x, xMin, xMax);
+		var iny = hxd.Math.clamp(p.y, yMin, yMax);
+		var inz = hxd.Math.clamp(p.z, zMin, zMax);
+		return new Point(inx, iny, inz);
+	}
+
+	public inline function distanceTo( p : h3d.col.Point ) : Float {
+		return closestPoint(p).distance(p);
 	}
 
 	public static inline function fromPoints( min : Point, max : Point ) {

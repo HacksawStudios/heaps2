@@ -6,7 +6,6 @@ class Bindless extends SampleApp {
 	var treeBatch : h3d.scene.MeshBatch;
 
 	override function init() {
-		h3d.Engine.getCurrent().driver.enableBindless();
 		cache = new h3d.prim.ModelCache();
 
 		var sun = new h3d.scene.pbr.DirLight(new h3d.Vector(0.3, -0.4, -0.9), s3d);
@@ -46,10 +45,11 @@ class Bindless extends SampleApp {
 			treeBatch.emitInstance();
 		}
 
-		new h3d.scene.CameraController(s3d).loadFromCamera();
+		new h3d.scene.CameraController.OrbitCameraController(s3d).loadFromCamera();
 	}
 
 	static function main() {
+		h3d.impl.Driver.requestFeature(Bindless);
 		h3d.mat.PbrMaterialSetup.set();
 		hxd.Res.initEmbed();
 		new Bindless();
