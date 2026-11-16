@@ -1,5 +1,7 @@
 package h3d.prim;
 
+import wrench.core.text.builder.TextLayoutIndexTracker;
+
 typedef HideProps = {
 	var animations : haxe.DynamicAccess<{ events : Array<h3d.anim.Animation.Event> }>;
 }
@@ -84,16 +86,44 @@ class ModelCache {
 		return m.col;
 	}
 
+	function findTexture(fileName:String, entries : Array<hxd.fs.FileEntry>) : Null<String> {
+		for (entry in entries) {
+			if (entry.isDirectory) {
+				final found = findTexture(fileName, hxd.Res.loader.fs.dir(entry.path));
+				if (found != null) {
+					return found;
+				}
+			} else if (entry.name == fileName) {
+				return entry.path;
+			}
+		}
+		return null;
+	}
+
 	public function loadTexture( model : hxd.res.Model, texturePath, async = false ) : h3d.mat.Texture {
-		var fullPath = texturePath;
-		if(model != null)
-			fullPath = model.entry.path + "@" + fullPath;
-		var t = textures.get(fullPath);
+		// This loader would originally commit to texturePath, but this would cause an exception for absolute path, even if we actually had enough data to work with.
+		// Wrench now introduces a recursive search from the model's root. We don't expect more than 2 or 3 levels deep so it's quick and safe.
+		// Ensures if the texture exists within the expected project structure and conventions, it will always be found.
+		final rootDir = model.entry.directory.split('/').shift();
+		final fileName = texturePath.split('/').pop();
+		final entries: Array<hxd.fs.FileEntry> = hxd.Res.loader.fs.dir(rootDir);
+		final solvedTexture = findTexture(fileName, entries);
+
+		if(solvedTexture == null){
+			trace('Warning: Texture ${texturePath} for ${model.entry.name}');
+			return null;
+		}
+
+		var t = textures.get(solvedTexture);
 		if( t != null )
+		{
 			return t;
+		}
+		
+		// Once a reasonable path is solved, continue with Heap's original solver.
 		var tres;
 		try {
-			tres = hxd.res.Loader.currentInstance.load(texturePath);
+			tres = hxd.res.Loader.currentInstance.load(solvedTexture);
 		} catch( error : hxd.res.NotFound ) {
 			if(model == null)
 				throw error;
@@ -115,13 +145,14 @@ class ModelCache {
 				tres = hxd.res.Loader.currentInstance.load(path);
 			} catch( e : hxd.res.NotFound ) {
 				// force good path error
-				throw error + (model != null ? " fullpath : " + fullPath : "");
+				trace('good path error: $solvedTexture');
+				throw error + (model != null ? " fullpath : " + solvedTexture : "");
 			}
 		}
 		var img = tres.toImage();
 		img.enableAsyncLoading = async;
 		t = img.toTexture();
-		textures.set(fullPath, t);
+		textures.set(solvedTexture, t);
 		return t;
 	}
 
