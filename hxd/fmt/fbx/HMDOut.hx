@@ -1,8 +1,8 @@
 package hxd.fmt.fbx;
-using hxd.fmt.fbx.Data;
+import hxd.BufferFormat;
 import hxd.fmt.fbx.BaseLibrary;
 import hxd.fmt.hmd.Data;
-import hxd.BufferFormat;
+using hxd.fmt.fbx.Data;
 
 typedef CollideParams = {
 	?useDefault : Bool,
@@ -1114,6 +1114,7 @@ class HMDOut extends BaseLibrary {
 					foundSkin.push(o);
 					o2.skin = o;
 					if( o.model == null ) o.model = m;
+					getDefaultMatrixes(o.model).isSkinRoot = true;
 					ignoreMissingObject(m.getId()); // make sure we don't store animation for the model (only skin object has one)
 					// copy parent
 					var p = o.parent;
@@ -1216,7 +1217,16 @@ class HMDOut extends BaseLibrary {
 			}
 
 			var q = m.toQuaternion(true);
+
+			// Fix for import rotation on Wrench
+			if (o.skin != null) {
+				var rotation = new h3d.Matrix();
+				q.toMatrix(rotation);
+				rotation.rotate(0, Math.PI, 0);
+				q.initRotateMatrix(rotation);
+			}
 			q.normalize();
+			
 			if( q.w < 0 ) q.negate();
 			p.qx = q.x;
 			p.qy = q.y;
@@ -1579,6 +1589,23 @@ class HMDOut extends BaseLibrary {
 		p.x = round(m._41);
 		p.y = round(m._42);
 		p.z = round(m._43);
+
+		// var rebuilt = p.toMatrix();
+		// var originalValues = m.getFloats();
+		// var rebuiltValues = rebuilt.getFloats();
+		// var error = 0.0;
+
+		// for (i in 0...originalValues.length) {
+		// 	var delta = Math.abs(originalValues[i] - rebuiltValues[i]);
+		// 	if (delta > error)
+		// 		error = delta;
+		// }
+
+		// if (error > 0.001) {
+		// 	trace('makePosition round-trip error: $error');
+		// 	trace('original: $m');
+		// 	trace('rebuilt: $rebuilt');
+		// }
 		return p;
 	}
 

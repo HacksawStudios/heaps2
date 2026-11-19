@@ -45,6 +45,7 @@ class DefaultMatrixes {
 	public var wasRemoved : Null<Int>;
 
 	public var transPos : h3d.Matrix;
+	public var isSkinRoot : Bool = false;
 
 	public function new() {
 	}
@@ -506,7 +507,7 @@ class BaseLibrary {
 
 		var originalUpAxis = "1";
 		var upAxis = "1";
-		var frontAxis = "-2";
+		var frontAxis = "-0";
 
 		for (p in root.getAll("GlobalSettings.Properties70.P")) {
 			switch (p.props[0].toString()) {
@@ -521,18 +522,24 @@ class BaseLibrary {
 		}
 
 		// Convert model if front axis isn't matching heaps's front axis
-		var preRot = new h3d.Vector(0, 0, 0);
-
-		if (frontAxis != "-0") {
-			switch (frontAxis) {
-				case "1" if (upAxis == "2"): preRot.z = 90;
-				case "-1" if (upAxis == "2"): preRot.z = -90;
-				case "2" if (upAxis == "1"): preRot.x = 90; preRot.z = -90;
-				case "-2" if (upAxis == "1"): preRot.x = 90; preRot.z = 90;
-				default: 'Front axis $frontAxis is not supported';
-			}
-		}
+		var preRot = new h3d.Vector(0, -90, 0);
+		// preRot.z += 180;
 		// preRot.y = -90;
+
+		// if (frontAxis == "-0") {
+		// 	preRot.y = -90;
+			
+
+		// }
+		// else{
+		// 	switch (frontAxis) {
+		// 		case "1" if (upAxis == "2"): preRot.z = 90;
+		// 		case "-1" if (upAxis == "2"): preRot.z = -90;
+		// 		case "2" if (upAxis == "1"): preRot.x = 90; preRot.z = -90;
+		// 		case "-2" if (upAxis == "1"): preRot.x = 90; preRot.z = 90;
+		// 		default: 'Front axis $frontAxis is not supported';
+		// 	}
+		// }
 
 		for (rootObject in getRootModels()) {
 			var props = rootObject.get("Properties70");
@@ -1040,6 +1047,19 @@ class BaseLibrary {
 
 		if( animName == null ) animName = getParent(animNode,"AnimationStack").getName();
 
+		// Find armature to fix animation rotation fro Wrench
+		for (o in buildHierarchy().objects) {
+			if (o.isJoint || o.model == null)
+				continue;
+
+			for (child in o.childs) {
+				if (child.isJoint) {
+					getDefaultMatrixes(o.model).isSkinRoot = true;
+					break;
+				}
+			}
+		}
+
 		var curves = new Map();
 		var P0 = new Point();
 		var P1 = new Point(1, 1, 1);
@@ -1369,6 +1389,22 @@ class BaseLibrary {
 						f.tx = -f.tx;
 						f.qy = -f.qy;
 						f.qz = -f.qz;
+					}
+
+					// Only for the armature object's track, not individual bones.
+					if (c.def.isSkinRoot) {
+						q.set(f.qx, f.qy, f.qz, f.qw);
+
+						var rotation = new h3d.Matrix();
+						q.toMatrix(rotation);
+						rotation.rotate(0, Math.PI, 0);
+						q.initRotateMatrix(rotation);
+						q.normalize();
+
+						f.qx = q.x;
+						f.qy = q.y;
+						f.qz = q.z;
+						f.qw = q.w;
 					}
 
 					curFrame = f;
